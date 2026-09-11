@@ -139,6 +139,64 @@ class StooqSource:
         return out
 
 
+class AlpacaBarsSource:
+    """Daily bars from Alpaca's market-data API (split and dividend adjusted).
+
+    Free plans may query the consolidated (SIP) feed as long as the window
+    ends at least 15 minutes ago, so `end` is clamped to now - lag_minutes.
+    History is shallow compared with Yahoo (roughly 2016 onward), which is
+    why the automatic chain uses this source for incremental updates only.
+    Needs ALPACA_API_KEY / ALPACA_SECRET_KEY or an injected client.
+    """
+
+    name = "alpaca"
+
+    def __init__(self, api_key: str | None = None, secret_key: str | None = None, feed: str = "sip",
+                 batch_size: int = 100, lag_minutes: int = 16, client=None):
+        import os
+        self.feed = feed
+        self.batch_size = batch_size
+        self.lag_minutes = lag_minutes
+        if client is not None:
+            self.client = client
+            return
+        key = api_key or os.environ.get("ALPACA_API_KEY")
+        secret = secret_key or os.environ.get("ALPACA_SECRET_KEY")
+        if not key or not secret:
+            raise RuntimeError("AlpacaBarsSource needs ALPACA_API_KEY and ALPACA_SECRET_KEY")
+        from alpaca.data.historical import StockHistoricalDataClient
+        self.client = StockHistoricalDataClient(key, secret)
+
+    def fetch_many(self, tickers, start=None, end=None) -> dict[str, pd.DataFrame]:
+        from alpaca.data.enums import Adjustment, DataFeed
+        from alpaca.data.requests import StockBarsRequest
+        from alpaca.data.timeframe import TimeFrame
+        tickers = list(dict.fromkeys(t.upper() for t in tickers))
+        now = pd.Timestamp.now(tz="UTC")
+        end_ts = min(pd.Timestamp(end, tz="UTC") + pd.Timedelta(days=1) if end else now, now) - pd.Timedelta(minutes=self.lag_minutes)
+        start_ts = pd.Timestamp(start or "2015-01-01", tz="UTC")
+        out: dict[str, pd.DataFrame] = {}
+        for i in range(0, len(tickers), self.batch_size):
+            batch = tickers[i:i + self.batch_size]
+            req = StockBarsRequest(symbol_or_symbols=batch, timeframe=TimeFrame.Day, start=start_ts.to_pydatetime(),
+                                   end=end_ts.to_pydatetime(), adjustment=Adjustment.ALL, feed=DataFeed(self.feed))
+            try:
+                bars = self.client.get_stock_bars(req)
+            except Exception as e:  # noqa: BLE001 - network/API error: let the chain fall through
+                log.warning("alpaca bars failed for %d symbols: %s", len(batch), e)
+                continue
+            df = getattr(bars, "df", None)
+            if df is None or len(df) == 0:
+                continue
+            if isinstance(df.index, pd.MultiIndex):
+                for sym, g in df.groupby(level=0):
+                    g = g.droplevel(0)
+                    out[str(sym).upper()] = normalize_bars(g[["open", "high", "low", "close", "volume"]])
+            elif len(batch) == 1:
+                out[batch[0]] = normalize_bars(df[["open", "high", "low", "close", "volume"]])
+        return out
+
+
 class ChainedSource:
     """Try sources in order; a ticker missing from one falls through to the next."""
 
@@ -170,6 +228,14 @@ def get_source(name: str = "auto") -> BarSource:
         return YFinanceSource()
     if name == "stooq":
         return StooqSource()
+    if name == "alpaca":
+        return AlpacaBarsSource()
     if name == "auto":
         return ChainedSource(YFinanceSource(), StooqSource())
-    raise ValueError(f"unknown source {name!r}; choose auto, yfinance, or stooq")
+    if name == "auto-incremental":
+        # official broker data first for the recent bars that drive live decisions
+        try:
+            return ChainedSource(AlpacaBarsSource(), YFinanceSource(), StooqSource())
+        except (RuntimeError, ImportError):
+            return ChainedSource(YFinanceSource(), StooqSource())
+    raise ValueError(f"unknown source {name!r}; choose auto, yfinance, stooq, or alpaca")

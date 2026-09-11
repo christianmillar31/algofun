@@ -35,6 +35,11 @@ class CostModel:
         c = qty * self.commission_per_share + qty * price * self.commission_pct
         return max(c, self.commission_min)
 
+    def scaled(self, k: float) -> CostModel:
+        """Every cost component multiplied by k (stress test at k=2)."""
+        return CostModel(self.commission_per_share * k, self.commission_min * k, self.commission_pct * k,
+                         self.slippage_bps * k, self.spread_bps * k)
+
     # ---- presets ---------------------------------------------------------
     @classmethod
     def zero(cls) -> CostModel:

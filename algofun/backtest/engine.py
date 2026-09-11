@@ -42,6 +42,8 @@ class BacktestConfig:
     # no-trade band: skip a rebalance trade smaller than this fraction of equity
     # unless it closes the position. Cuts churn from weight drift.
     min_trade_weight: float = 0.002
+    # never fill more than this share of the bar's volume in one name; the rest is dropped
+    max_volume_share: float | None = 0.05
     rebalance: str | int | None = None  # override the strategy's schedule
     benchmark: str | None = "SPY"     # ticker in the panel to compare against
 
@@ -110,6 +112,7 @@ def run_backtest(panel: Panel, strategy: Strategy, config: BacktestConfig | None
         raise ValueError("empty panel")
 
     open_px = panel.open.to_numpy(dtype="float64")
+    vol_arr = panel.volume.to_numpy(dtype="float64")
     # valuation price: last known close (a name that stops printing keeps its last mark)
     mark_px = panel.close.ffill().to_numpy(dtype="float64")
 
@@ -168,6 +171,10 @@ def run_backtest(panel: Panel, strategy: Strategy, config: BacktestConfig | None
                 if not closing and notional_ref < cfg.min_trade_weight * equity_open:
                     continue
                 side = 1 if d > 0 else -1
+                if cfg.max_volume_share:
+                    vcap = cfg.max_volume_share * vol_arr[i, j]
+                    if np.isfinite(vcap) and vcap > 0 and abs(d) > vcap:
+                        d = side * vcap
                 price = costs.fill_price(px_fill_ref[j], side)
                 if side == 1 and not cfg.limits.allow_short:
                     # cap buys at available cash (after commission)

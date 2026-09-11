@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from .sources import BAR_COLUMNS, BarSource, empty_bars, get_source, normalize_bars
+from .sources import BAR_COLUMNS, BarSource, empty_bars, get_source, normalize_bars  # noqa: F401
 
 log = logging.getLogger(__name__)
 
@@ -148,6 +148,7 @@ class BarStore:
         ticker -> number of rows now cached (0 means nothing could be fetched).
         """
         src = get_source(source) if isinstance(source, str) else source
+        inc_src = get_source("auto-incremental") if source == "auto" else src
         tickers = list(dict.fromkeys(t.upper() for t in tickers))
         full, incremental = [], {}
         for t in tickers:
@@ -174,13 +175,29 @@ class BarStore:
         for t, s in incremental.items():
             by_start.setdefault(s, []).append(t)
         for s, ts in by_start.items():
-            got = src.fetch_many(ts, s, end)
+            got = inc_src.fetch_many(ts, s, end)
             for t in ts:
                 df = got.get(t)
                 if df is not None and not df.empty:
+                    self._warn_if_disagree(t, df)
                     self.save(t, df, merge=True)
                 counts[t] = len(self.load(t))
         return counts
+
+    def _warn_if_disagree(self, ticker: str, fresh: pd.DataFrame, tolerance: float = 0.02) -> float:
+        """Compare overlapping closes between the cache and a fresh fetch (which may
+        come from a different vendor). Returns the largest relative gap seen."""
+        old = self.load(ticker)
+        fresh = normalize_bars(fresh)
+        common = old.index.intersection(fresh.index)
+        if len(common) == 0:
+            return 0.0
+        gap = ((fresh.loc[common, "close"] / old.loc[common, "close"]) - 1.0).abs()
+        worst = float(gap.max())
+        if worst > tolerance:
+            log.warning("%s: fresh closes differ from cached by up to %.1f%% on %d overlapping days "
+                        "(vendor disagreement or an adjustment); newest data wins", ticker, worst * 100, len(common))
+        return worst
 
     # -- panel -------------------------------------------------------------
     def load_panel(self, tickers: Sequence[str] | None = None, start=None, end=None,

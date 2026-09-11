@@ -110,6 +110,17 @@ def cmd_backtest(args) -> None:
           f"[{panel.dates[0].date()} -> {panel.dates[-1].date()}]  costs={args.costs}")
     res = run_backtest(panel, strat, cfg, start=args.start, end=args.end)
     print(res.summary())
+    if args.stress:
+        import dataclasses
+        rows = [("1x", res.metrics())]
+        for k in (2.0, 3.0):
+            r_k = run_backtest(panel, get_strategy(args.strategy, **parse_params(args.params)),
+                               dataclasses.replace(cfg, costs=cfg.costs.scaled(k)), start=args.start, end=args.end)
+            rows.append((f"{k:.0f}x", r_k.metrics()))
+        print("\nCost stress (an edge that dies at 2x was never there):")
+        print(f"  {'costs':<6}{'cagr':>9}{'sharpe':>9}{'max_dd':>9}{'turnover':>10}")
+        for label, m in rows:
+            print(f"  {label:<6}{m['cagr']*100:8.2f}%{m['sharpe']:9.3f}{m['max_drawdown']*100:8.2f}%{m['annual_turnover']:9.1f}x")
     if args.out:
         res.save(args.out)
         print(f"saved to {args.out}/")
@@ -304,7 +315,7 @@ def build_parser() -> argparse.ArgumentParser:
     f.add_argument("--universe", default="sp500+etfs")
     f.add_argument("--start", default="1990-01-01")
     f.add_argument("--end", default=None)
-    f.add_argument("--source", default="auto", choices=["auto", "yfinance", "stooq"])
+    f.add_argument("--source", default="auto", choices=["auto", "yfinance", "stooq", "alpaca"])
     f.add_argument("--cache", default="data/cache")
     f.add_argument("--force", action="store_true", help="re-download full history")
     f.set_defaults(func=cmd_fetch)
@@ -324,6 +335,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_backtest_args(b)
     b.add_argument("--out", default=None, help="directory to save equity/trades/metrics")
     b.add_argument("--plot", action="store_true")
+    b.add_argument("--stress", action="store_true", help="also run at 2x and 3x the assumed costs")
     b.set_defaults(func=cmd_backtest)
 
     w = sub.add_parser("walkforward", help="rolling train/test parameter selection")

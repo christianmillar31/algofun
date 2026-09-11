@@ -14,6 +14,7 @@ class Account:
     cash: float
     equity: float
     buying_power: float
+    last_equity: float | None = None   # equity at the prior close, when the broker provides it
 
 
 @dataclass
@@ -77,3 +78,10 @@ class Broker(ABC):
 
     def cancel_open_orders(self) -> int:
         return 0
+
+    def flatten(self) -> list[OrderResult]:
+        """Close every position with market orders. The emergency exit."""
+        self.cancel_open_orders()
+        orders = [Order(t, "sell" if p.quantity > 0 else "buy", abs(p.quantity))
+                  for t, p in self.positions().items() if p.quantity != 0]
+        return [self.submit(o) for o in orders]

@@ -52,6 +52,11 @@ def next_trading_day(date) -> pd.Timestamp:
     return (pd.Timestamp(date).normalize() + _BDAY).normalize()
 
 
+def previous_trading_day(date) -> pd.Timestamp:
+    """Last trading day strictly before `date`."""
+    return (pd.Timestamp(date).normalize() - _BDAY).normalize()
+
+
 def trading_days(start, end) -> pd.DatetimeIndex:
     return pd.bdate_range(start, end, freq=_BDAY)
 

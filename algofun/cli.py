@@ -145,8 +145,25 @@ def _make_broker(args):
     return get_broker("alpaca", paper=not args.live)
 
 
+def _guardrails(args):
+    from .live import Guardrails
+    if args.no_guards:
+        log.warning("GUARDS DISABLED by --no-guards")
+        return Guardrails.off()
+    return Guardrails(max_daily_loss_pct=args.max_daily_loss_pct, max_orders=args.max_orders,
+                      max_order_pct=args.max_order_pct, max_stale_sessions=args.max_stale_sessions,
+                      reconcile=not args.no_reconcile)
+
+
 def cmd_rebalance(args) -> None:
-    from .live import execute_plan, plan_rebalance
+    from .live import (
+        execute_plan,
+        load_state,
+        plan_rebalance,
+        run_guards,
+        save_state,
+        snapshot_state,
+    )
     store = BarStore(args.cache)
     tickers = resolve_universe(args.universe, cache_dir=Path(args.cache) / "universe") if args.universe \
         else store.tickers()
@@ -163,10 +180,23 @@ def cmd_rebalance(args) -> None:
                           force=args.force)
     print(f"broker={broker.name}  strategy={strat.describe()}")
     print(plan.describe())
+
+    # ---- kill switch: nothing below runs unless every guard passes ----
+    acct = broker.account()
+    positions = broker.positions()
+    last_state = load_state(args.ledger)
+    report = run_guards(plan, acct, positions, _guardrails(args), last_state=last_state)
+    print(report.describe())
+    if not report.passed:
+        print("\nBLOCKED: no orders submitted. Review the failures above; use --no-guards only deliberately.")
+        sys.exit(2)
+
     if plan.skipped or not plan.orders:
+        save_state(args.ledger, snapshot_state(broker, plan))
         return
     if not args.execute:
         print("\ndry run: nothing submitted (add --execute to send orders)")
+        save_state(args.ledger, snapshot_state(broker, plan))
         return
     if args.broker != "paper":
         try:
@@ -180,6 +210,34 @@ def cmd_rebalance(args) -> None:
               f"{'  @ ' + format(r.filled_price, '.2f') if r.filled_price else ''}  {r.message}")
     acct = broker.account()
     print(f"account: cash={acct.cash:,.2f} equity={acct.equity:,.2f}")
+    save_state(args.ledger, snapshot_state(broker, plan, results))
+    print(f"state snapshot written to {args.ledger}")
+
+
+def cmd_flatten(args) -> None:
+    """Emergency exit: cancel open orders and close every position."""
+    broker = _make_broker(args)
+    if args.broker == "paper":
+        store = BarStore(args.cache)
+        held = list(broker.positions())
+        if held and all(store.has(t) for t in held):
+            broker.set_prices(store.load_panel(held).close.iloc[-1])
+    pos = broker.positions()
+    acct = broker.account()
+    print(f"broker={broker.name}  equity={acct.equity:,.2f}  positions={len(pos)}")
+    for t, p in sorted(pos.items()):
+        print(f"  {t:<6} qty={p.quantity:>10.4f} mv={p.market_value:>10.2f}")
+    if not pos:
+        print("nothing to flatten")
+        return
+    if not (args.execute and args.yes):
+        print("\ndry run: pass BOTH --execute and --yes to close every position at market")
+        return
+    results = broker.flatten()
+    for r in results:
+        print(f"  {r.order.side:<4} {r.order.ticker:<6} {r.order.quantity:>10.4f}  {r.status}  {r.message}")
+    acct = broker.account()
+    print(f"account after: cash={acct.cash:,.2f} equity={acct.equity:,.2f}")
 
 
 def cmd_status(args) -> None:
@@ -269,7 +327,8 @@ def build_parser() -> argparse.ArgumentParser:
     w.set_defaults(func=cmd_walkforward)
 
     for name, fn, help_ in (("rebalance", cmd_rebalance, "compute (and optionally send) today's orders"),
-                            ("status", cmd_status, "show broker account and positions")):
+                            ("status", cmd_status, "show broker account and positions"),
+                            ("flatten", cmd_flatten, "EMERGENCY: cancel open orders and close every position")):
         r = sub.add_parser(name, help=help_)
         r.add_argument("--broker", default="paper", choices=["paper", "alpaca"])
         r.add_argument("--cash", type=float, default=1_000.0, help="paper broker starting cash")
@@ -278,6 +337,10 @@ def build_parser() -> argparse.ArgumentParser:
         r.add_argument("--live", action="store_true", help="allow a LIVE Alpaca account (needs ALPACA_PAPER=false)")
         if name == "status":
             r.add_argument("--cache", default="data/cache")
+        elif name == "flatten":
+            r.add_argument("--cache", default="data/cache")
+            r.add_argument("--execute", action="store_true", help="actually close positions")
+            r.add_argument("--yes", action="store_true", help="second confirmation; required with --execute")
         else:
             _add_data_args(r)
             r.add_argument("--strategy", required=True, choices=sorted(STRATEGIES))
@@ -289,6 +352,18 @@ def build_parser() -> argparse.ArgumentParser:
             r.add_argument("--force", action="store_true",
                            help="rebalance even if today is not a scheduled rebalance day")
             r.add_argument("--log", default="runs/rebalance_log.jsonl")
+            g = r.add_argument_group("guards (kill switch)")
+            g.add_argument("--ledger", default="runs/state.json",
+                           help="position snapshot used for reconciliation between runs")
+            g.add_argument("--max-daily-loss-pct", type=float, default=0.03,
+                           help="block if equity is down more than this vs the prior close")
+            g.add_argument("--max-orders", type=int, default=60, help="block if the plan has more orders than this")
+            g.add_argument("--max-order-pct", type=float, default=0.30,
+                           help="block if any single order exceeds this fraction of equity")
+            g.add_argument("--max-stale-sessions", type=int, default=1,
+                           help="block if the latest bar is older than this many trading days")
+            g.add_argument("--no-reconcile", action="store_true", help="skip the position reconciliation check")
+            g.add_argument("--no-guards", action="store_true", help="disable every guard (do not do this casually)")
         r.set_defaults(func=fn)
     return p
 

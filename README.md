@@ -105,7 +105,17 @@ documents what the strategy needs.
 4. **Live needs a double opt-in.** `ALPACA_PAPER=false` *and* `--live` on the
    command line, or the CLI refuses. Keep `--max-weight` and `--max-gross`
    conservative.
-5. **The rebalancer respects the strategy's schedule.** A monthly strategy
+5. **Every run passes through a kill switch first.** Before any order is
+   sent, `algofun rebalance` checks that the latest bar is fresh, that the
+   account is not down more than 3% on the day, that no single order exceeds
+   30% of equity and the plan has fewer than 60 orders, and that the broker's
+   positions match the snapshot written after the previous run. Any failure
+   blocks the run and exits non-zero so the scheduled job turns red. Tune with
+   `--max-daily-loss-pct`, `--max-orders`, `--max-order-pct`,
+   `--max-stale-sessions`; `--no-guards` disables everything and should never
+   be in a scheduled job. `algofun flatten --broker alpaca --execute --yes`
+   is the emergency exit: it cancels open orders and closes every position.
+6. **The rebalancer respects the strategy's schedule.** A monthly strategy
    only trades on the last NYSE trading day of the month, exactly like the
    backtest. Pass `--force` for the first deployment or a manual reset.
 

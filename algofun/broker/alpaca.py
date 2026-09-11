@@ -70,7 +70,9 @@ class AlpacaBroker(Broker):
 
     def account(self) -> Account:
         a = with_retries(self.trading.get_account, what="get account")
-        return Account(cash=float(a.cash), equity=float(a.equity), buying_power=float(a.buying_power))
+        last = float(a.last_equity) if getattr(a, "last_equity", None) else None
+        return Account(cash=float(a.cash), equity=float(a.equity), buying_power=float(a.buying_power),
+                       last_equity=last)
 
     def positions(self) -> dict[str, Position]:
         out = {}
@@ -107,6 +109,21 @@ class AlpacaBroker(Broker):
 
     def cancel_open_orders(self) -> int:
         return len(self.trading.cancel_orders())
+
+    def flatten(self) -> list[OrderResult]:
+        """Cancel everything open and close every position via Alpaca's bulk endpoint."""
+        out = []
+        for r in with_retries(partial(self.trading.close_all_positions, True), what="close all positions"):
+            body = getattr(r, "body", None)
+            symbol = getattr(body, "symbol", None) or getattr(r, "symbol", "?")
+            status = getattr(r, "status", "")
+            ok = str(status).startswith("2") if status else body is not None
+            side = getattr(body, "side", None)
+            qty = float(getattr(body, "qty", 0) or 0)
+            out.append(OrderResult(Order(symbol, str(side.value if hasattr(side, "value") else side or "sell"), qty),
+                                   str(getattr(body, "id", "")), "accepted" if ok else "rejected",
+                                   message="" if ok else str(status)))
+        return out
 
     def submit(self, order: Order) -> OrderResult:
         from alpaca.trading.enums import OrderSide, TimeInForce

@@ -69,6 +69,13 @@ jobs:
           key: bars-${{ github.run_id }}
           restore-keys: bars-
 
+      - name: Restore run ledger
+        uses: actions/cache/restore@v4
+        with:
+          path: runs
+          key: runs-${{ github.run_id }}
+          restore-keys: runs-
+
       - name: Select credentials
         run: |
           if [ "$MODE" = "live" ]; then
@@ -112,6 +119,13 @@ jobs:
         with:
           path: data/cache
           key: bars-${{ github.run_id }}
+
+      - name: Save run ledger
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: runs
+          key: runs-${{ github.run_id }}
 
       - name: Upload run log
         if: always()

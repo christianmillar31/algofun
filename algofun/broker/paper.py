@@ -26,6 +26,7 @@ class PaperBroker(Broker):
         self.costs = costs or CostModel.retail()
         self._positions: dict[str, dict] = {}   # ticker -> {qty, avg_price}
         self._prices: pd.Series = pd.Series(dtype="float64")
+        self._day: dict = {}
         self.state_file = Path(state_file) if state_file else None
         self.fills: list[OrderResult] = []
         if self.state_file and self.state_file.exists():
@@ -42,7 +43,12 @@ class PaperBroker(Broker):
     def account(self) -> Account:
         mv = sum(p["qty"] * float(self._prices.get(t, p["avg_price"])) for t, p in self._positions.items())
         eq = self.cash + mv
-        return Account(cash=self.cash, equity=eq, buying_power=self.cash)
+        # first observation of each day becomes the "prior close" reference for the next day
+        today = pd.Timestamp.now(tz="UTC").strftime("%Y-%m-%d")
+        if self._day.get("date") != today:
+            self._day = {"date": today, "last_equity": self._day.get("equity", eq), "equity": eq}
+            self._save()
+        return Account(cash=self.cash, equity=eq, buying_power=self.cash, last_equity=self._day.get("last_equity"))
 
     def positions(self) -> dict[str, Position]:
         out = {}
@@ -99,10 +105,11 @@ class PaperBroker(Broker):
         if not self.state_file:
             return
         self.state_file.parent.mkdir(parents=True, exist_ok=True)
-        self.state_file.write_text(json.dumps({"cash": self.cash, "positions": self._positions}, indent=2))
+        self.state_file.write_text(json.dumps({"cash": self.cash, "positions": self._positions, "day": self._day}, indent=2))
 
     def _load(self) -> None:
         d = json.loads(self.state_file.read_text())
         self.cash = float(d["cash"])
         self._positions = {k: {"qty": float(v["qty"]), "avg_price": float(v["avg_price"])}
                            for k, v in d["positions"].items()}
+        self._day = d.get("day", {})

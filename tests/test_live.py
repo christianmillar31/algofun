@@ -58,7 +58,7 @@ def test_plan_and_execute_end_to_end(tmp_path):
     broker = PaperBroker(cash=1000.0)
     broker.set_prices(p.close.iloc[-1])
     strat = Momentum(lookback=126, skip=21, top_n=2, market_filter=None)
-    plan = plan_rebalance(strat, store, broker, p.tickers)
+    plan = plan_rebalance(strat, store, broker, p.tickers, force=True)
     assert plan.as_of == p.dates[-1]
     assert len(plan.orders) == 2 and all(o.side == "buy" for o in plan.orders)
     assert "orders=2" in plan.describe()
@@ -66,7 +66,27 @@ def test_plan_and_execute_end_to_end(tmp_path):
     assert all(r.status == "filled" for r in results)
     assert (tmp_path / "log.jsonl").read_text().count("\n") == 2
     # converged: nothing to do on the second pass
-    assert plan_rebalance(strat, store, broker, p.tickers).orders == []
+    assert plan_rebalance(strat, store, broker, p.tickers, force=True).orders == []
+
+
+def test_plan_honours_schedule_and_force(tmp_path):
+    # panel ending on a Wednesday mid-month: monthly strategy must skip unless forced
+    start = pd.bdate_range(end="2024-03-13", periods=320)[0]   # ends on a mid-month Wednesday
+    p = make_panel(n_tickers=3, n_days=320, seed=3, start=start, tickers=["A", "B", "C"])
+    assert p.dates[-1] == pd.Timestamp("2024-03-13")
+    store = BarStore(tmp_path / "cache")
+    for t in p.tickers:
+        store.save(t, pd.DataFrame({f: p.field(f)[t] for f in ("open", "high", "low", "close", "volume")}))
+    broker = PaperBroker(cash=1000.0)
+    broker.set_prices(p.close.iloc[-1])
+    strat = Momentum(lookback=126, skip=21, top_n=2, market_filter=None)   # monthly
+    plan = plan_rebalance(strat, store, broker, p.tickers)
+    assert plan.skipped and plan.orders == [] and "monthly" in plan.skipped
+    forced = plan_rebalance(strat, store, broker, p.tickers, force=True)
+    assert forced.skipped is None and len(forced.orders) == 2
+    daily = plan_rebalance(Momentum(lookback=126, skip=21, top_n=2, market_filter=None, rebalance="daily"),
+                           store, broker, p.tickers)
+    assert daily.skipped is None and len(daily.orders) == 2
 
 
 def test_plan_requires_history(tmp_path):

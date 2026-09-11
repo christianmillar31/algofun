@@ -20,6 +20,7 @@ from ..broker.base import Broker, Order, OrderResult
 from ..data.store import BarStore
 from ..risk.limits import RiskLimits
 from ..strategies.base import Strategy, clean_weights
+from .calendar import is_rebalance_day, next_trading_day
 
 log = logging.getLogger(__name__)
 
@@ -34,6 +35,7 @@ class RebalancePlan:
     orders: list[Order]
     prices: pd.Series
     results: list[OrderResult] = field(default_factory=list)
+    skipped: str | None = None   # set when the schedule says "not today"
 
     def to_frame(self) -> pd.DataFrame:
         rows = []
@@ -49,6 +51,8 @@ class RebalancePlan:
     def describe(self) -> str:
         head = (f"as of {self.as_of.date()}  equity={self.equity:,.2f}  cash={self.cash:,.2f}  "
                 f"targets={int((self.target_weights != 0).sum())} names  orders={len(self.orders)}")
+        if self.skipped:
+            return head + f"\n  skipped: {self.skipped}"
         if not self.orders:
             return head + "\n  (no trades needed)"
         return head + "\n" + self.to_frame().to_string(index=False)
@@ -92,18 +96,35 @@ def compute_orders(target_weights: pd.Series, current_qty: pd.Series, prices: pd
 
 def plan_rebalance(strategy: Strategy, store: BarStore, broker: Broker, universe: Sequence[str],
                    limits: RiskLimits | None = None, min_trade_notional: float = 1.0,
-                   min_trade_weight: float = 0.002, min_bars: int | None = None) -> RebalancePlan:
+                   min_trade_weight: float = 0.002, min_bars: int | None = None,
+                   force: bool = False) -> RebalancePlan:
+    """Build today's order list.
+
+    Respects the strategy's rebalance schedule the same way the backtester
+    does: on a non-rebalance day the plan is empty and `plan.skipped` says
+    why. `force=True` overrides that (first deployment, manual runs).
+    """
     limits = limits or RiskLimits()
     panel = store.load_panel(list(universe), min_bars=min_bars or 0)
     if len(panel) <= strategy.warmup:
         raise ValueError(f"need > {strategy.warmup} bars of history, have {len(panel)}; run `algofun fetch`")
     view = MarketView(panel, len(panel) - 1)
-    weights = limits.apply(clean_weights(strategy.target_weights(view), panel.tickers))
-    weights = weights[weights != 0]
 
     acct = broker.account()
     positions = broker.positions()
     current_qty = pd.Series({t: p.quantity for t, p in positions.items()}, dtype="float64")
+
+    if not force and not is_rebalance_day(view.date, strategy.rebalance, panel.dates):
+        prices = broker.latest_prices(list(current_qty.index)) if len(current_qty) else pd.Series(dtype="float64")
+        current_w = (current_qty * prices.reindex(current_qty.index)) / acct.equity if acct.equity else current_qty * 0
+        return RebalancePlan(as_of=view.date, equity=acct.equity, cash=acct.cash,
+                             target_weights=pd.Series(dtype="float64"), current_weights=current_w.fillna(0.0),
+                             orders=[], prices=prices,
+                             skipped=f"{view.date.date()} is not a rebalance day for schedule={strategy.rebalance!r} "
+                                     f"(next trading day {next_trading_day(view.date).date()}); use force to override")
+
+    weights = limits.apply(clean_weights(strategy.target_weights(view), panel.tickers))
+    weights = weights[weights != 0]
     need_px = sorted(set(weights.index) | set(current_qty.index))
     prices = broker.latest_prices(need_px) if need_px else pd.Series(dtype="float64")
     # fall back to last close from our own data when the broker has no quote

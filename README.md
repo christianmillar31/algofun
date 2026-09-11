@@ -105,6 +105,25 @@ documents what the strategy needs.
 4. **Live needs a double opt-in.** `ALPACA_PAPER=false` *and* `--live` on the
    command line, or the CLI refuses. Keep `--max-weight` and `--max-gross`
    conservative.
+5. **The rebalancer respects the strategy's schedule.** A monthly strategy
+   only trades on the last NYSE trading day of the month, exactly like the
+   backtest. Pass `--force` for the first deployment or a manual reset.
+
+### Run it from GitHub Actions (no server needed)
+
+`.github/workflows/rebalance.yml` runs every weekday at 22:00 UTC (after the
+close), refreshes the bar cache, and rebalances the **paper** account.
+
+1. In Alpaca, switch the dashboard to *Paper* and generate an API key pair.
+2. In this repo: Settings -> Secrets and variables -> Actions -> add
+   `ALPACA_API_KEY` and `ALPACA_SECRET_KEY`.
+3. Actions -> "Rebalance (Alpaca)" -> Run workflow, with *force* on for the
+   first run so it takes its initial positions. Watch the log. From then on
+   the schedule does the rest.
+
+Going live later means adding `ALPACA_LIVE_API_KEY` / `ALPACA_LIVE_SECRET_KEY`
+and choosing `mode=live` in a manual run. Scheduled runs never touch live keys.
+Never paste keys into chat, issues, or commits.
 
 ### Why Alpaca and not Robinhood
 

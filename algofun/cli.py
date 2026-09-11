@@ -159,9 +159,12 @@ def cmd_rebalance(args) -> None:
         panel = store.load_panel(tickers, min_bars=args.min_bars)
         broker.set_prices(panel.close.iloc[-1])
     limits = RiskLimits(max_weight=args.max_weight, max_gross=args.max_gross)
-    plan = plan_rebalance(strat, store, broker, tickers, limits=limits, min_bars=args.min_bars)
+    plan = plan_rebalance(strat, store, broker, tickers, limits=limits, min_bars=args.min_bars,
+                          force=args.force)
     print(f"broker={broker.name}  strategy={strat.describe()}")
     print(plan.describe())
+    if plan.skipped or not plan.orders:
+        return
     if not args.execute:
         print("\ndry run: nothing submitted (add --execute to send orders)")
         return
@@ -269,16 +272,18 @@ def build_parser() -> argparse.ArgumentParser:
         r.add_argument("--state-file", default="paper_state.json", help="paper broker persistence")
         r.add_argument("--costs", default="retail", choices=sorted(COST_PRESETS))
         r.add_argument("--live", action="store_true", help="allow a LIVE Alpaca account (needs ALPACA_PAPER=false)")
-        if name == "rebalance":
-            _add_data_args(r)
-        else:
+        if name == "status":
             r.add_argument("--cache", default="data/cache")
+        else:
+            _add_data_args(r)
             r.add_argument("--strategy", required=True, choices=sorted(STRATEGIES))
             r.add_argument("--params", default=None)
             r.add_argument("--max-weight", type=float, default=0.25)
             r.add_argument("--max-gross", type=float, default=1.0)
             r.add_argument("--refresh", action="store_true", help="fetch latest bars before deciding")
             r.add_argument("--execute", action="store_true", help="actually submit orders")
+            r.add_argument("--force", action="store_true",
+                           help="rebalance even if today is not a scheduled rebalance day")
             r.add_argument("--log", default="runs/rebalance_log.jsonl")
         r.set_defaults(func=fn)
     return p

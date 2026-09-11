@@ -65,6 +65,27 @@ def load_sp500_constituents(cache_dir: str | os.PathLike = "data/cache/universe"
     return df
 
 
+def sector_map(cache_dir: str | os.PathLike = "data/cache/universe", refresh: bool = False,
+               extra: dict[str, str] | None = None) -> dict[str, str]:
+    """Ticker -> GICS sector from the constituents table; ETFs map to 'ETF'.
+
+    Returns {} (with a warning) if the table cannot be loaded, so callers
+    degrade to "no sector caps" rather than failing.
+    """
+    out: dict[str, str] = {t: "ETF" for t in ETFS}
+    try:
+        df = load_sp500_constituents(cache_dir, refresh=refresh)
+        col = "GICS Sector" if "GICS Sector" in df.columns else None
+        if col:
+            out.update({to_yahoo_symbol(s): str(sec) for s, sec in zip(df["Symbol"].astype(str), df[col], strict=True)})
+    except Exception as e:  # noqa: BLE001 - network or parse failure
+        import logging
+        logging.getLogger(__name__).warning("sector map unavailable (%s); sector caps will not apply", e)
+    if extra:
+        out.update(extra)
+    return out
+
+
 def sp500_tickers(**kwargs) -> list[str]:
     df = load_sp500_constituents(**kwargs)
     return [to_yahoo_symbol(s) for s in df["Symbol"].astype(str)]

@@ -199,7 +199,7 @@ def run_backtest(panel: Panel, strategy: Strategy, config: BacktestConfig | None
             view = MarketView(panel, i)
             raw = strategy.target_weights(view)
             w = clean_weights(raw, tickers)
-            w = cfg.limits.apply(w)
+            w = cfg.limits.apply(w, sectors=panel.sectors)
             pending = w.to_numpy(dtype="float64")
 
     idx = dates[first:last + 1]

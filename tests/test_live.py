@@ -161,7 +161,7 @@ def test_plan_leaves_cash_buffer(tmp_path):
         store.save(t, pd.DataFrame({f: p.field(f)[t] for f in ("open", "high", "low", "close", "volume")}))
     broker = PaperBroker(cash=1000.0)
     broker.set_prices(p.close.iloc[-1])
-    strat = Momentum(lookback=126, skip=21, top_n=2, market_filter=None)
+    strat = Momentum(lookback=126, skip=21, top_n=2, market_filter=None, vol_target=0)   # fully invested
     from algofun.risk import RiskLimits
     plan = plan_rebalance(strat, store, broker, p.tickers, force=True, cash_buffer=0.02,
                           limits=RiskLimits(max_weight=0.5))   # two names, fully invested

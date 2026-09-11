@@ -7,9 +7,10 @@ from .sources import (
     normalize_bars,
 )
 from .store import BarStore, Panel, import_long_csv
-from .universe import ETFS, MEGA_CAPS, resolve_universe, sp500_tickers, to_yahoo_symbol
+from .universe import ETFS, MEGA_CAPS, resolve_universe, sector_map, sp500_tickers, to_yahoo_symbol
 
 __all__ = [
+    "sector_map",
     "BAR_COLUMNS",
     "ETFS",
     "MEGA_CAPS",

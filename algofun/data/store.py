@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import os
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import pandas as pd
@@ -33,6 +33,7 @@ class Panel:
     low: pd.DataFrame
     close: pd.DataFrame
     volume: pd.DataFrame
+    sectors: dict[str, str] = field(default_factory=dict)   # ticker -> sector, may be empty
 
     @property
     def tickers(self) -> list[str]:
@@ -49,11 +50,14 @@ class Panel:
         return getattr(self, name)
 
     def slice(self, start=None, end=None) -> Panel:
-        return Panel(**{f: getattr(self, f).loc[start:end] for f in BAR_COLUMNS})
+        return Panel(**{f: getattr(self, f).loc[start:end] for f in BAR_COLUMNS}, sectors=self.sectors)
 
     def select(self, tickers: Sequence[str]) -> Panel:
         cols = [t for t in tickers if t in self.close.columns]
-        return Panel(**{f: getattr(self, f)[cols] for f in BAR_COLUMNS})
+        return Panel(**{f: getattr(self, f)[cols] for f in BAR_COLUMNS}, sectors=self.sectors)
+
+    def sector_of(self, ticker: str) -> str:
+        return self.sectors.get(ticker, "Unknown")
 
     def with_min_history(self, min_bars: int) -> Panel:
         """Drop tickers with fewer than min_bars non-NaN closes."""
@@ -64,7 +68,8 @@ class Panel:
         return self.close.pct_change(fill_method=None)
 
     @classmethod
-    def from_bars(cls, bars: dict[str, pd.DataFrame], start=None, end=None) -> Panel:
+    def from_bars(cls, bars: dict[str, pd.DataFrame], start=None, end=None,
+                  sectors: dict[str, str] | None = None) -> Panel:
         if not bars:
             raise ValueError("no bars supplied")
         frames = {f: {} for f in BAR_COLUMNS}
@@ -76,7 +81,7 @@ class Panel:
         idx = wide["close"].index
         idx.name = "date"
         wide = {f: d.reindex(idx) for f, d in wide.items()}
-        return cls(**wide)
+        return cls(**wide, sectors=dict(sectors or {}))
 
 
 class BarStore:
@@ -163,7 +168,7 @@ class BarStore:
 
     # -- panel -------------------------------------------------------------
     def load_panel(self, tickers: Sequence[str] | None = None, start=None, end=None,
-                   min_bars: int = 0) -> Panel:
+                   min_bars: int = 0, sectors: dict[str, str] | None = None) -> Panel:
         tickers = list(tickers) if tickers else self.tickers()
         bars = {}
         for t in tickers:
@@ -174,7 +179,7 @@ class BarStore:
         if missing:
             log.warning("%d tickers not in cache (run `algofun fetch`): %s%s",
                         len(missing), ", ".join(missing[:10]), "..." if len(missing) > 10 else "")
-        panel = Panel.from_bars(bars, start, end)
+        panel = Panel.from_bars(bars, start, end, sectors=sectors)
         if min_bars:
             panel = panel.with_min_history(min_bars)
         return panel

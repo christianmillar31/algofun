@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 
 from .backtest import COST_PRESETS, BacktestConfig, run_backtest, walk_forward
-from .data import BarStore, import_long_csv, resolve_universe
+from .data import BarStore, import_long_csv, resolve_universe, sector_map
 from .risk import RiskLimits
 from .strategies import STRATEGIES, get_strategy, parse_params
 
@@ -41,13 +41,14 @@ def _add_backtest_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--benchmark", default="SPY")
     p.add_argument("--max-weight", type=float, default=0.25)
     p.add_argument("--max-gross", type=float, default=1.0)
+    p.add_argument("--max-sector", type=float, default=0.30, help="cap on any one sector's weight (needs sector map)")
     p.add_argument("--no-fractional", action="store_true", help="whole shares only")
 
 
 def _load_panel(args):
     store = BarStore(args.cache)
     tickers = resolve_universe(args.universe, cache_dir=Path(args.cache) / "universe") if args.universe else None
-    panel = store.load_panel(tickers, min_bars=args.min_bars)
+    panel = store.load_panel(tickers, min_bars=args.min_bars, sectors=sector_map(Path(args.cache) / "universe"))
     if len(panel) == 0:
         sys.exit("no bars in cache; run `algofun fetch` or `algofun import-csv` first")
     return store, panel
@@ -59,7 +60,7 @@ def _config(args) -> BacktestConfig:
         rb = int(rb)
     return BacktestConfig(
         initial_cash=args.cash, costs=COST_PRESETS[args.costs](),
-        limits=RiskLimits(max_weight=args.max_weight, max_gross=args.max_gross),
+        limits=RiskLimits(max_weight=args.max_weight, max_gross=args.max_gross, max_sector_weight=args.max_sector),
         allow_fractional=not args.no_fractional, rebalance=rb,
         benchmark=args.benchmark or None,
     )
@@ -172,12 +173,13 @@ def cmd_rebalance(args) -> None:
         store.update(tickers, start=args.start or "2000-01-01")
     strat = get_strategy(args.strategy, **parse_params(args.params))
     broker = _make_broker(args)
+    sectors = sector_map(Path(args.cache) / "universe")
     if args.broker == "paper":
         panel = store.load_panel(tickers, min_bars=args.min_bars)
         broker.set_prices(panel.close.iloc[-1])
-    limits = RiskLimits(max_weight=args.max_weight, max_gross=args.max_gross)
+    limits = RiskLimits(max_weight=args.max_weight, max_gross=args.max_gross, max_sector_weight=args.max_sector)
     plan = plan_rebalance(strat, store, broker, tickers, limits=limits, min_bars=args.min_bars,
-                          force=args.force)
+                          force=args.force, sectors=sectors)
     print(f"broker={broker.name}  strategy={strat.describe()}")
     print(plan.describe())
 
@@ -347,6 +349,7 @@ def build_parser() -> argparse.ArgumentParser:
             r.add_argument("--params", default=None)
             r.add_argument("--max-weight", type=float, default=0.25)
             r.add_argument("--max-gross", type=float, default=1.0)
+            r.add_argument("--max-sector", type=float, default=0.30, help="cap on any one sector's weight")
             r.add_argument("--refresh", action="store_true", help="fetch latest bars before deciding")
             r.add_argument("--execute", action="store_true", help="actually submit orders")
             r.add_argument("--force", action="store_true",

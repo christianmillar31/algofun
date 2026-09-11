@@ -34,6 +34,14 @@ class MarketView:
     def tickers(self) -> list[str]:
         return self._panel.tickers
 
+    @property
+    def sectors(self) -> dict[str, str]:
+        """Ticker -> sector, when the panel was loaded with a sector map (else empty)."""
+        return self._panel.sectors
+
+    def sector_of(self, ticker: str) -> str:
+        return self._panel.sector_of(ticker)
+
     def __len__(self) -> int:
         """Number of bars visible (including today)."""
         return self._i + 1

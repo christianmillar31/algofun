@@ -134,7 +134,8 @@ def cap_buys_to_cash(orders: list[Order], prices: pd.Series, cash: float, equity
 def plan_rebalance(strategy: Strategy, store: BarStore, broker: Broker, universe: Sequence[str],
                    limits: RiskLimits | None = None, min_trade_notional: float = 1.0,
                    min_trade_weight: float = 0.002, min_bars: int | None = None,
-                   force: bool = False, cash_buffer: float = 0.005) -> RebalancePlan:
+                   force: bool = False, cash_buffer: float = 0.005,
+                   sectors: dict[str, str] | None = None) -> RebalancePlan:
     """Build today's order list.
 
     Respects the strategy's rebalance schedule the same way the backtester
@@ -142,7 +143,7 @@ def plan_rebalance(strategy: Strategy, store: BarStore, broker: Broker, universe
     why. `force=True` overrides that (first deployment, manual runs).
     """
     limits = limits or RiskLimits()
-    panel = store.load_panel(list(universe), min_bars=min_bars or 0)
+    panel = store.load_panel(list(universe), min_bars=min_bars or 0, sectors=sectors)
     if len(panel) <= strategy.warmup:
         raise ValueError(f"need > {strategy.warmup} bars of history, have {len(panel)}; run `algofun fetch`")
     view = MarketView(panel, len(panel) - 1)
@@ -160,7 +161,7 @@ def plan_rebalance(strategy: Strategy, store: BarStore, broker: Broker, universe
                              skipped=f"{view.date.date()} is not a rebalance day for schedule={strategy.rebalance!r} "
                                      f"(next trading day {next_trading_day(view.date).date()}); use force to override")
 
-    weights = limits.apply(clean_weights(strategy.target_weights(view), panel.tickers))
+    weights = limits.apply(clean_weights(strategy.target_weights(view), panel.tickers), sectors=panel.sectors)
     weights = weights[weights != 0]
     need_px = sorted(set(weights.index) | set(current_qty.index))
     prices = _safe_latest_prices(broker, need_px)

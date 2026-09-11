@@ -102,7 +102,8 @@ class AlpacaBroker(Broker):
         return pd.Series(out, dtype="float64")
 
     def is_market_open(self) -> bool:
-        return bool(self.trading.get_clock().is_open)
+        """Raises on a persistent API error; callers treat that as 'unknown'."""
+        return bool(with_retries(self.trading.get_clock, attempts=2, what="get clock").is_open)
 
     def cancel_open_orders(self) -> int:
         return len(self.trading.cancel_orders())
@@ -116,12 +117,30 @@ class AlpacaBroker(Broker):
             symbol=order.ticker, qty=round(qty, 6),
             side=OrderSide.BUY if order.side == "buy" else OrderSide.SELL,
             time_in_force=TimeInForce.DAY,
+            client_order_id=order.client_order_id,
         )
         try:
-            o = self.trading.submit_order(req)
-        except Exception as e:
-            return OrderResult(order, "", "rejected", message=str(e))
+            # Retrying is safe only because client_order_id makes a duplicate submit
+            # fail on Alpaca's side instead of creating a second order.
+            o = with_retries(partial(self.trading.submit_order, req),
+                             attempts=3 if order.client_order_id else 1,
+                             what=f"submit {order.side} {order.ticker}")
+        except Exception as e:  # noqa: BLE001 - APIError, HTTPError, connection errors
+            msg = str(e)
+            if order.client_order_id and "client_order_id" in msg and "unique" in msg.lower():
+                # an earlier attempt did go through; report that order instead
+                try:
+                    o = self.trading.get_order_by_client_id(order.client_order_id)
+                except Exception as e2:  # noqa: BLE001
+                    return OrderResult(order, "", "unknown",
+                                       message=f"submitted on an earlier attempt but lookup failed: {e2}")
+            else:
+                return OrderResult(order, "", "rejected", message=msg)
+        return self._result(order, o)
+
+    @staticmethod
+    def _result(order: Order, o) -> OrderResult:
         filled = float(o.filled_qty or 0)
         price = float(o.filled_avg_price) if o.filled_avg_price else None
-        return OrderResult(order, str(o.id), str(o.status.value if hasattr(o.status, "value") else o.status),
-                           filled_quantity=filled, filled_price=price)
+        status = o.status.value if hasattr(o.status, "value") else str(o.status)
+        return OrderResult(order, str(o.id), str(status), filled_quantity=filled, filled_price=price)

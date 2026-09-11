@@ -168,8 +168,12 @@ def cmd_rebalance(args) -> None:
     if not args.execute:
         print("\ndry run: nothing submitted (add --execute to send orders)")
         return
-    if args.broker != "paper" and not broker.is_market_open():
-        print("market is closed: DAY orders will queue for the next open (this matches the backtest)")
+    if args.broker != "paper":
+        try:
+            if not broker.is_market_open():
+                print("market is closed: DAY orders will queue for the next open (this matches the backtest)")
+        except Exception as e:  # noqa: BLE001 - informational only
+            print(f"could not read the market clock ({e}); submitting anyway")
     results = execute_plan(plan, broker, log_path=args.log)
     for r in results:
         print(f"  {r.order.side:<4} {r.order.ticker:<6} {r.order.quantity:>10.4f}  {r.status}"

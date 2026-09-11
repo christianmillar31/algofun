@@ -62,6 +62,8 @@ def test_plan_and_execute_end_to_end(tmp_path):
     assert plan.as_of == p.dates[-1]
     assert len(plan.orders) == 2 and all(o.side == "buy" for o in plan.orders)
     assert "orders=2" in plan.describe()
+    ids = {o.client_order_id for o in plan.orders}
+    assert len(ids) == 2 and all(i and i.startswith("algofun-") for i in ids)
     results = execute_plan(plan, broker, log_path=tmp_path / "log.jsonl")
     assert all(r.status == "filled" for r in results)
     assert (tmp_path / "log.jsonl").read_text().count("\n") == 2

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -148,6 +149,9 @@ def plan_rebalance(strategy: Strategy, store: BarStore, broker: Broker, universe
     current_w = (current_qty * prices.reindex(current_qty.index)) / acct.equity if acct.equity else current_qty * 0
     orders = compute_orders(weights, current_qty, prices, acct.equity, min_trade_notional,
                             min_trade_weight, broker.supports_fractional)
+    run_id = uuid.uuid4().hex[:8]   # unique per plan so retries within a run are idempotent
+    for o in orders:
+        o.client_order_id = f"algofun-{view.date:%Y%m%d}-{run_id}-{o.ticker}-{o.side}"
     return RebalancePlan(as_of=view.date, equity=acct.equity, cash=acct.cash, target_weights=weights,
                          current_weights=current_w.fillna(0.0), orders=orders, prices=prices)
 

@@ -20,7 +20,7 @@ dependencies = [
 [project.optional-dependencies]
 alpaca = ["alpaca-py>=0.30"]
 plot = ["matplotlib>=3.7"]
-dev = ["pytest>=7.4", "ruff>=0.4"]
+dev = ["pytest>=7.4", "ruff>=0.4", "alpaca-py>=0.30"]
 
 [project.scripts]
 algofun = "algofun.cli:main"

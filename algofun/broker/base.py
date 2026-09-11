@@ -31,6 +31,9 @@ class Order:
     quantity: float      # shares (fractional allowed if broker supports it)
     kind: str = "market"
     time_in_force: str = "day"
+    #: idempotency key: brokers that support it (Alpaca) reject a duplicate, so a
+    #: retried submit can never double-fill. Stamped by plan_rebalance.
+    client_order_id: str | None = None
 
     @property
     def signed_quantity(self) -> float:

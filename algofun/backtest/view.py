@@ -1,0 +1,84 @@
+"""MarketView: the only thing a Strategy is allowed to see.
+
+It wraps the full Panel but every accessor slices to bars at or before the
+decision date. There is no method that returns future data, so a strategy
+cannot peek at tomorrow without going out of its way to break the abstraction.
+"""
+from __future__ import annotations
+
+import pandas as pd
+
+from ..data.store import Panel
+
+
+class MarketView:
+    __slots__ = ("_i", "_panel")
+
+    def __init__(self, panel: Panel, i: int):
+        if i < 0 or i >= len(panel):
+            raise IndexError(f"bar index {i} out of range for panel of length {len(panel)}")
+        self._panel = panel
+        self._i = i
+
+    # ---- identity --------------------------------------------------------
+    @property
+    def date(self) -> pd.Timestamp:
+        """The decision date. The strategy sees this bar's close, nothing later."""
+        return self._panel.dates[self._i]
+
+    @property
+    def bar_index(self) -> int:
+        return self._i
+
+    @property
+    def tickers(self) -> list[str]:
+        return self._panel.tickers
+
+    def __len__(self) -> int:
+        """Number of bars visible (including today)."""
+        return self._i + 1
+
+    # ---- history accessors ----------------------------------------------
+    def history(self, field: str = "close", lookback: int | None = None) -> pd.DataFrame:
+        """Bars up to and including today. lookback=N returns the last N rows.
+
+        Prefer a bounded lookback: it is faster and it forces you to state how
+        much history the strategy actually needs (its `warmup`).
+        """
+        df = self._panel.field(field)
+        stop = self._i + 1
+        start = 0 if lookback is None else max(0, stop - lookback)
+        return df.iloc[start:stop]
+
+    @property
+    def close(self) -> pd.DataFrame:
+        return self.history("close")
+
+    @property
+    def open(self) -> pd.DataFrame:
+        return self.history("open")
+
+    @property
+    def high(self) -> pd.DataFrame:
+        return self.history("high")
+
+    @property
+    def low(self) -> pd.DataFrame:
+        return self.history("low")
+
+    @property
+    def volume(self) -> pd.DataFrame:
+        return self.history("volume")
+
+    def last(self, field: str = "close") -> pd.Series:
+        """Today's value of a field for every ticker (NaN if it did not trade)."""
+        return self._panel.field(field).iloc[self._i]
+
+    def returns(self, lookback: int, field: str = "close") -> pd.DataFrame:
+        """Daily simple returns over the last `lookback` bars."""
+        px = self.history(field, lookback + 1)
+        return px.pct_change().iloc[1:]
+
+    def tradable(self) -> pd.Series:
+        """Tickers with a valid close today."""
+        return self.last("close").notna()

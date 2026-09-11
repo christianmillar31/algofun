@@ -1,0 +1,139 @@
+# algofun
+
+An honest algorithmic trading lab. Data in, strategy, backtest with real costs,
+walk-forward parameter selection, then the *same* strategy object drives a paper
+or live rebalancer.
+
+```
+data -> strategy -> backtest -> risk -> execution
+```
+
+The backtester is the product. The engine is built so a strategy **cannot see
+the future**: it decides on today's close through a `MarketView` that only
+exposes bars up to today, and it gets filled at *tomorrow's open* after
+slippage, spread and commission. The tests in `tests/test_no_lookahead.py`
+enforce that.
+
+## Quick start
+
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev,plot]"
+
+# 1. get data (S&P 500 constituents + broad ETFs, full daily history from Yahoo)
+algofun fetch --universe sp500+etfs --start 1990-01-01
+
+# 2. see what is available
+algofun list-strategies
+
+# 3. backtest
+algofun backtest --strategy momentum --min-bars 500 --plot --out runs/momentum
+algofun backtest --strategy sma_crossover --params fast=20,slow=100 --costs pessimistic
+
+# 4. pick parameters honestly (rolling train/test)
+algofun walkforward --strategy sma_crossover --train-bars 504 --test-bars 126
+
+# 5. paper trade with fake money (dry run prints the orders it would send)
+algofun rebalance --strategy momentum --broker paper
+algofun rebalance --strategy momentum --broker paper --execute
+```
+
+No network from where you are? Import any long-format CSV
+(`date,open,high,low,close,volume,Name`), e.g. the public
+[`all_stocks_5yr.csv`](https://github.com/plotly/datasets/blob/master/all_stocks_5yr.csv)
+(505 S&P names, 2013 to 2018):
+
+```bash
+algofun import-csv all_stocks_5yr.csv
+algofun backtest --strategy momentum --params market_filter=None --benchmark "" --min-bars 1000
+```
+
+## What is in the box
+
+| Module | What it does |
+| --- | --- |
+| `algofun/data` | Universes (S&P 500 list, ETFs), Yahoo + Stooq sources with a fallback chain, incremental parquet cache, aligned OHLCV `Panel`, bulk CSV import |
+| `algofun/backtest` | Event-driven daily engine, `CostModel` presets (`zero`, `retail`, `ibkr`, `pessimistic`), metrics (CAGR, Sharpe, Sortino, max drawdown, Calmar, turnover, win rate, beta/alpha vs benchmark), rebalance schedules, walk-forward optimisation |
+| `algofun/strategies` | `buy_and_hold`, `sma_crossover`, `momentum` (cross-sectional, with market filter), `mean_reversion` (z-score dips in uptrends). Each declares its own `warmup`, `rebalance` and `param_grid` |
+| `algofun/risk` | Equal-weight, inverse-vol and vol-target sizing; hard `RiskLimits` (per-name cap, gross cap, no shorts by default) applied after every strategy decision |
+| `algofun/broker` | `Broker` interface, in-memory `PaperBroker` (persists to JSON, uses the same `CostModel`), `AlpacaBroker` adapter |
+| `algofun/live` | `plan_rebalance` diffs target weights against broker holdings with the same no-trade band as the backtester; `execute_plan` submits sells then buys and appends to `runs/rebalance_log.jsonl` |
+
+## Writing a strategy
+
+```python
+import pandas as pd
+from algofun.strategies.base import Strategy
+from algofun.risk import equal_weight
+
+class Breakout(Strategy):
+    name = "breakout"
+    defaults = {"lookback": 55, "max_names": 20}
+    param_grid = {"lookback": [20, 55, 100]}
+
+    def configure(self):
+        self.warmup = self.lookback + 1
+        self.rebalance = "weekly"
+
+    def target_weights(self, view):            # view only knows bars <= today
+        px = view.history("close", self.lookback + 1)
+        at_high = (px.iloc[-1] >= px.iloc[:-1].max()) & view.tradable()
+        return equal_weight(list(at_high[at_high].index[: self.max_names]))
+```
+
+Register it in `algofun/strategies/__init__.py` and it works in every command.
+Ask for bounded history (`view.history(field, lookback)`); it is faster and it
+documents what the strategy needs.
+
+## Going live (read this part)
+
+1. **Backtest with `--costs pessimistic` too.** If the edge disappears, it was
+   never there.
+2. **Walk-forward, not in-sample.** The stitched out-of-sample curve from
+   `algofun walkforward` is the only number that has not seen its own future.
+3. **Paper first, for months.** Create a free paper account at Alpaca, then:
+   ```bash
+   pip install -e ".[alpaca]"
+   export ALPACA_API_KEY=... ALPACA_SECRET_KEY=... ALPACA_PAPER=true
+   algofun status --broker alpaca
+   algofun rebalance --strategy momentum --broker alpaca --refresh            # dry run
+   algofun rebalance --strategy momentum --broker alpaca --refresh --execute  # sends DAY orders
+   ```
+   Run it once a day after the close (cron, GitHub Actions, whatever). Market
+   DAY orders placed after hours fill at the next open, which is precisely
+   what the backtester assumes.
+4. **Live needs a double opt-in.** `ALPACA_PAPER=false` *and* `--live` on the
+   command line, or the CLI refuses. Keep `--max-weight` and `--max-gross`
+   conservative.
+
+### Why Alpaca and not Robinhood
+
+Robinhood has no official API for retail stock trading. The third-party
+libraries that exist drive its private endpoints, violate its terms of
+service, and get accounts locked. Alpaca is also commission-free, supports
+fractional shares, has a real paper-trading environment and an official SDK.
+Same "free trades", much lower chance of losing your account. The `Broker`
+interface is small if you ever want to add another one.
+
+## Known limits, on purpose
+
+- Daily bars only. Intraday is a different engine and a different data bill.
+- Long-only by default. Shorting is supported in accounting (`allow_short=True`)
+  but borrow fees and locate availability are not modelled.
+- The current S&P 500 list is today's survivors. Backtests on it are an upper
+  bound. Fetch a wider universe (`--universe sp500+etfs` plus your own lists)
+  and prefer strategies that don't depend on a fixed constituent list.
+- Yahoo data is free and mostly fine for daily bars; it is not audited.
+  Dividends are folded into adjusted prices (total return), which is what you
+  want for backtests.
+
+## Tests
+
+```bash
+pytest
+```
+
+The suite covers: no lookahead (view boundaries, fill timing, an explicit
+cheat attempt), cost model, cash/position accounting identity, share
+rounding, rebalance schedules, risk limits, each strategy on synthetic data,
+walk-forward fold construction, the paper broker, and the order planner.

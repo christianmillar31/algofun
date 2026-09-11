@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+.pytest_cache/
+.ruff_cache/
+
+# Market data cache and run artifacts (regenerate with `algofun fetch`)
+data/cache/
+data/raw/
+runs/
+*.parquet
+*.csv
+!tests/fixtures/*.csv
+
+# Secrets
+.env
+paper_state.json

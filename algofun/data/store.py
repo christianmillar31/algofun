@@ -174,30 +174,48 @@ class BarStore:
         by_start: dict[str, list[str]] = {}
         for t, s in incremental.items():
             by_start.setdefault(s, []).append(t)
+        realign: list[str] = []
         for s, ts in by_start.items():
             got = inc_src.fetch_many(ts, s, end)
             for t in ts:
                 df = got.get(t)
                 if df is not None and not df.empty:
-                    self._warn_if_disagree(t, df)
+                    if self._history_disagrees(t, df):
+                        realign.append(t)
+                        continue
                     self.save(t, df, merge=True)
+                counts[t] = len(self.load(t))
+        if realign:
+            # an adjustment (split, dividend) or a vendor mismatch changed history: one consistent
+            # series from the base source beats a stitched one, so refetch the whole thing
+            log.warning("re-downloading full history for %d tickers whose older bars no longer match: %s",
+                        len(realign), ", ".join(realign[:10]))
+            got = src.fetch_many(realign, start, end)
+            for t in realign:
+                df = got.get(t)
+                if df is not None and not df.empty:
+                    self.save(t, df, merge=False)
                 counts[t] = len(self.load(t))
         return counts
 
-    def _warn_if_disagree(self, ticker: str, fresh: pd.DataFrame, tolerance: float = 0.02) -> float:
-        """Compare overlapping closes between the cache and a fresh fetch (which may
-        come from a different vendor). Returns the largest relative gap seen."""
+    def _history_disagrees(self, ticker: str, fresh: pd.DataFrame, tolerance: float = 0.02,
+                           ignore_newest: int = 2) -> bool:
+        """True when a fresh fetch disagrees with cached closes on overlapping days
+        OTHER than the newest few (which legitimately change when a partial
+        intraday bar is replaced by the completed one)."""
         old = self.load(ticker)
         fresh = normalize_bars(fresh)
-        common = old.index.intersection(fresh.index)
-        if len(common) == 0:
-            return 0.0
-        gap = ((fresh.loc[common, "close"] / old.loc[common, "close"]) - 1.0).abs()
+        common = old.index.intersection(fresh.index).sort_values()
+        if len(common) <= ignore_newest:
+            return False
+        settled = common[:-ignore_newest]
+        gap = ((fresh.loc[settled, "close"] / old.loc[settled, "close"]) - 1.0).abs()
         worst = float(gap.max())
         if worst > tolerance:
-            log.warning("%s: fresh closes differ from cached by up to %.1f%% on %d overlapping days "
-                        "(vendor disagreement or an adjustment); newest data wins", ticker, worst * 100, len(common))
-        return worst
+            log.warning("%s: settled closes differ from cache by up to %.1f%% on %d overlapping days",
+                        ticker, worst * 100, len(settled))
+            return True
+        return False
 
     # -- panel -------------------------------------------------------------
     def load_panel(self, tickers: Sequence[str] | None = None, start=None, end=None,

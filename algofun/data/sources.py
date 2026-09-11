@@ -139,6 +139,15 @@ class StooqSource:
         return out
 
 
+def to_alpaca_symbol(symbol: str) -> str:
+    """Alpaca uses '.' for share classes where Yahoo uses '-' (BF-B -> BF.B)."""
+    return symbol.upper().replace("-", ".")
+
+
+def from_alpaca_symbol(symbol: str) -> str:
+    return symbol.upper().replace(".", "-")
+
+
 class AlpacaBarsSource:
     """Daily bars from Alpaca's market-data API (split and dividend adjusted).
 
@@ -177,7 +186,7 @@ class AlpacaBarsSource:
         start_ts = pd.Timestamp(start or "2015-01-01", tz="UTC")
         out: dict[str, pd.DataFrame] = {}
         for i in range(0, len(tickers), self.batch_size):
-            batch = tickers[i:i + self.batch_size]
+            batch = [to_alpaca_symbol(t) for t in tickers[i:i + self.batch_size]]
             req = StockBarsRequest(symbol_or_symbols=batch, timeframe=TimeFrame.Day, start=start_ts.to_pydatetime(),
                                    end=end_ts.to_pydatetime(), adjustment=Adjustment.ALL, feed=DataFeed(self.feed))
             try:
@@ -191,9 +200,9 @@ class AlpacaBarsSource:
             if isinstance(df.index, pd.MultiIndex):
                 for sym, g in df.groupby(level=0):
                     g = g.droplevel(0)
-                    out[str(sym).upper()] = normalize_bars(g[["open", "high", "low", "close", "volume"]])
+                    out[from_alpaca_symbol(str(sym))] = normalize_bars(g[["open", "high", "low", "close", "volume"]])
             elif len(batch) == 1:
-                out[batch[0]] = normalize_bars(df[["open", "high", "low", "close", "volume"]])
+                out[from_alpaca_symbol(batch[0])] = normalize_bars(df[["open", "high", "low", "close", "volume"]])
         return out
 
 

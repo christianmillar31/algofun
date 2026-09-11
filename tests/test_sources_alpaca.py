@@ -70,14 +70,57 @@ def test_auto_incremental_without_keys_is_yahoo_chain(monkeypatch):
     assert get_source("auto-incremental").name.startswith("alpaca+")
 
 
-def test_store_warns_on_vendor_disagreement(tmp_path, caplog):
+def test_alpaca_symbol_mapping():
+    from algofun.data.sources import from_alpaca_symbol, to_alpaca_symbol
+    assert to_alpaca_symbol("BF-B") == "BF.B" and to_alpaca_symbol("brk-b") == "BRK.B" and to_alpaca_symbol("AAPL") == "AAPL"
+    assert from_alpaca_symbol("BF.B") == "BF-B"
+    client = FakeDataClient()
+    AlpacaBarsSource(client=client).fetch_many(["BF-B", "AAPL"], start="2026-09-01")
+    assert client.requests[0].symbol_or_symbols == ["BF.B", "AAPL"]
+
+
+def test_partial_bar_refresh_is_not_a_disagreement_but_old_drift_is(tmp_path, caplog):
     store = BarStore(tmp_path)
     idx = pd.bdate_range("2026-09-01", periods=5)
     store.save("A", pd.DataFrame({"open": 1, "high": 1, "low": 1, "close": [10.0] * 5, "volume": 1}, index=idx))
+    # only the newest bar changed (yesterday's partial close replaced by the real one): fine
     fresh = pd.DataFrame({"open": 1, "high": 1, "low": 1, "close": [10.0, 10.0, 10.0, 10.0, 11.0], "volume": 1}, index=idx)
+    assert store._history_disagrees("A", fresh) is False
+    # an older bar moved 3%: history was re-adjusted or the vendor differs
+    drift = pd.DataFrame({"open": 1, "high": 1, "low": 1, "close": [10.3, 10.3, 10.3, 10.0, 10.0], "volume": 1}, index=idx)
     with caplog.at_level(logging.WARNING):
-        worst = store._warn_if_disagree("A", fresh)
-    assert worst == pytest.approx(0.10) and "differ from cached" in caplog.text
+        assert store._history_disagrees("A", drift) is True
+    assert "settled closes differ" in caplog.text
+
+
+def test_update_refetches_full_history_when_older_bars_drift(tmp_path):
+    idx_old = pd.bdate_range("2026-08-01", periods=30)
+
+    class Base:  # long-history vendor
+        name = "base"
+        calls = []
+        def fetch_many(self, tickers, start=None, end=None):
+            Base.calls.append((tuple(tickers), start))
+            return {t: pd.DataFrame({"open": 1, "high": 1, "low": 1, "close": 20.0, "volume": 1}, index=idx_old) for t in tickers}
+
+    class Inc:   # incremental vendor whose adjusted history disagrees on settled days
+        name = "inc"
+        def fetch_many(self, tickers, start=None, end=None):
+            idx = idx_old[-8:]
+            return {t: pd.DataFrame({"open": 1, "high": 1, "low": 1, "close": [21.0] * 6 + [20.0, 20.0], "volume": 1}, index=idx) for t in tickers}
+
+    store = BarStore(tmp_path)
+    store.save("A", pd.DataFrame({"open": 1, "high": 1, "low": 1, "close": 20.0, "volume": 1}, index=idx_old[:-3]))
+    import algofun.data.store as mod
+    orig = mod.get_source
+    mod.get_source = lambda name="auto": Inc() if name == "auto-incremental" else Base()
+    try:
+        counts = store.update(["A"], start="2026-08-01", source="auto")
+    finally:
+        mod.get_source = orig
+    assert counts == {"A": 30}                                # full series re-downloaded from the base source
+    assert (store.load("A")["close"] == 20.0).all()           # and it is internally consistent again
+    assert Base.calls and Base.calls[-1][0] == ("A",)
 
 
 def test_volume_cap_limits_fills_and_cost_scaling():

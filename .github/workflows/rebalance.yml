@@ -12,8 +12,9 @@ name: Rebalance (Alpaca)
 
 on:
   schedule:
-    # 22:00 UTC = 6pm EDT / 5pm EST, well after the 4pm ET close so the day's bar exists.
-    - cron: "0 22 * * 1-5"
+    # 22:17 UTC = 6:17pm EDT / 5:17pm EST, well after the 4pm ET close so the day's bar exists.
+    # Off the top of the hour on purpose: GitHub delays or drops crons in the congested :00 slot.
+    - cron: "17 22 * * 1-5"
   workflow_dispatch:
     inputs:
       mode:

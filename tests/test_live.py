@@ -96,3 +96,39 @@ def test_plan_requires_history(tmp_path):
         store.save(t, pd.DataFrame({f: p.field(f)[t] for f in ("open", "high", "low", "close", "volume")}))
     with pytest.raises(ValueError):
         plan_rebalance(Momentum(), store, PaperBroker(), p.tickers)
+
+
+def test_plan_survives_broker_quote_failure(tmp_path):
+    p = make_panel(n_tickers=3, n_days=320, seed=9, tickers=["A", "B", "C"])
+    store = BarStore(tmp_path / "cache")
+    for t in p.tickers:
+        store.save(t, pd.DataFrame({f: p.field(f)[t] for f in ("open", "high", "low", "close", "volume")}))
+
+    class FlakyBroker(PaperBroker):
+        def latest_prices(self, tickers):
+            raise RuntimeError("504 backend request timeout")
+
+    broker = FlakyBroker(cash=1000.0)
+    strat = Momentum(lookback=126, skip=21, top_n=2, market_filter=None)
+    plan = plan_rebalance(strat, store, broker, p.tickers, force=True)
+    assert len(plan.orders) == 2
+    # priced off the last cached close
+    for o in plan.orders:
+        assert plan.prices[o.ticker] == pytest.approx(p.close[o.ticker].iloc[-1])
+
+
+def test_with_retries_recovers_then_gives_up(monkeypatch):
+    from algofun.broker import alpaca as mod
+    monkeypatch.setattr(mod.time, "sleep", lambda s: None)
+    calls = {"n": 0}
+
+    def flaky():
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise RuntimeError("timeout")
+        return "ok"
+
+    assert mod.with_retries(flaky, attempts=3, base_delay=0) == "ok"
+    assert calls["n"] == 3
+    with pytest.raises(RuntimeError):
+        mod.with_retries(lambda: (_ for _ in ()).throw(RuntimeError("down")), attempts=2, base_delay=0)

@@ -63,7 +63,7 @@ jobs:
       - run: pip install -e ".[alpaca]"
 
       - name: Restore bar cache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: data/cache
           key: bars-${{ github.run_id }}
@@ -101,6 +101,13 @@ jobs:
       - name: Account after
         if: always()
         run: algofun status --broker alpaca $LIVE_FLAG
+
+      - name: Save bar cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: data/cache
+          key: bars-${{ github.run_id }}
 
       - name: Upload run log
         if: always()

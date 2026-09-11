@@ -12,12 +12,36 @@ official stock-trading API for retail accounts.
 """
 from __future__ import annotations
 
+import logging
 import os
-from collections.abc import Iterable
+import time
+from collections.abc import Callable, Iterable
+from functools import partial
+from typing import TypeVar
 
 import pandas as pd
 
 from .base import Account, Broker, Order, OrderResult, Position
+
+log = logging.getLogger(__name__)
+T = TypeVar("T")
+
+
+def with_retries(fn: Callable[[], T], attempts: int = 3, base_delay: float = 1.0,
+                 what: str = "request") -> T:
+    """Call fn(), retrying with exponential backoff. Re-raises the last error."""
+    last: Exception | None = None
+    for i in range(attempts):
+        try:
+            return fn()
+        except Exception as e:  # noqa: BLE001 - broker/network errors are heterogeneous
+            last = e
+            if i + 1 < attempts:
+                delay = base_delay * (2 ** i)
+                log.warning("%s failed (%s); retry %d/%d in %.0fs", what, e, i + 1, attempts - 1, delay)
+                time.sleep(delay)
+    assert last is not None
+    raise last
 
 
 class AlpacaBroker(Broker):
@@ -25,7 +49,7 @@ class AlpacaBroker(Broker):
     supports_fractional = True
 
     def __init__(self, api_key: str | None = None, secret_key: str | None = None,
-                 paper: bool | None = None):
+                 paper: bool | None = None, data_feed: str | None = None):
         try:
             from alpaca.data.historical import StockHistoricalDataClient
             from alpaca.trading.client import TradingClient
@@ -38,27 +62,44 @@ class AlpacaBroker(Broker):
         if paper is None:
             paper = os.environ.get("ALPACA_PAPER", "true").strip().lower() != "false"
         self.paper = paper
+        # free data plans only allow the IEX feed for recent trades; SIP needs a subscription
+        self.data_feed = (data_feed or os.environ.get("ALPACA_DATA_FEED", "iex")).lower()
         self.name = "alpaca-paper" if paper else "alpaca-LIVE"
         self.trading = TradingClient(self.api_key, self.secret_key, paper=paper)
         self.data = StockHistoricalDataClient(self.api_key, self.secret_key)
 
     def account(self) -> Account:
-        a = self.trading.get_account()
+        a = with_retries(self.trading.get_account, what="get account")
         return Account(cash=float(a.cash), equity=float(a.equity), buying_power=float(a.buying_power))
 
     def positions(self) -> dict[str, Position]:
         out = {}
-        for p in self.trading.get_all_positions():
+        for p in with_retries(self.trading.get_all_positions, what="get positions"):
             out[p.symbol] = Position(p.symbol, float(p.qty), float(p.avg_entry_price), float(p.market_value))
         return out
 
     def latest_prices(self, tickers: Iterable[str]) -> pd.Series:
+        """Latest trade price per ticker. Never raises: on a persistent data-API
+        error it returns what it has (possibly empty) and the planner falls back
+        to the last cached close."""
+        from alpaca.data.enums import DataFeed
         from alpaca.data.requests import StockLatestTradeRequest
         tickers = list(tickers)
         if not tickers:
             return pd.Series(dtype="float64")
-        trades = self.data.get_stock_latest_trade(StockLatestTradeRequest(symbol_or_symbols=tickers))
-        return pd.Series({t: float(trades[t].price) for t in tickers if t in trades}, dtype="float64")
+        feed = DataFeed(self.data_feed) if self.data_feed in {"iex", "sip", "otc"} else None
+        out: dict[str, float] = {}
+        for i in range(0, len(tickers), 100):
+            batch = tickers[i:i + 100]
+            req = StockLatestTradeRequest(symbol_or_symbols=batch, feed=feed)
+            try:
+                trades = with_retries(partial(self.data.get_stock_latest_trade, req), attempts=3,
+                                      what=f"latest trades for {len(batch)} symbols")
+            except Exception as e:  # noqa: BLE001
+                log.warning("latest prices unavailable for %d symbols (%s); using last close", len(batch), e)
+                continue
+            out.update({t: float(trades[t].price) for t in batch if t in trades})
+        return pd.Series(out, dtype="float64")
 
     def is_market_open(self) -> bool:
         return bool(self.trading.get_clock().is_open)

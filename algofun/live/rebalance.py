@@ -58,6 +58,18 @@ class RebalancePlan:
         return head + "\n" + self.to_frame().to_string(index=False)
 
 
+def _safe_latest_prices(broker: Broker, tickers: Sequence[str]) -> pd.Series:
+    """Ask the broker for quotes; a failure is logged, not fatal."""
+    if not tickers:
+        return pd.Series(dtype="float64")
+    try:
+        px = broker.latest_prices(list(tickers))
+    except Exception as e:  # noqa: BLE001 - any broker/network error
+        log.warning("broker quotes failed (%s); falling back to last close", e)
+        return pd.Series(dtype="float64")
+    return pd.Series(px, dtype="float64")
+
+
 def compute_orders(target_weights: pd.Series, current_qty: pd.Series, prices: pd.Series, equity: float,
                    min_trade_notional: float = 1.0, min_trade_weight: float = 0.002,
                    allow_fractional: bool = True) -> list[Order]:
@@ -115,7 +127,7 @@ def plan_rebalance(strategy: Strategy, store: BarStore, broker: Broker, universe
     current_qty = pd.Series({t: p.quantity for t, p in positions.items()}, dtype="float64")
 
     if not force and not is_rebalance_day(view.date, strategy.rebalance, panel.dates):
-        prices = broker.latest_prices(list(current_qty.index)) if len(current_qty) else pd.Series(dtype="float64")
+        prices = _safe_latest_prices(broker, list(current_qty.index))
         current_w = (current_qty * prices.reindex(current_qty.index)) / acct.equity if acct.equity else current_qty * 0
         return RebalancePlan(as_of=view.date, equity=acct.equity, cash=acct.cash,
                              target_weights=pd.Series(dtype="float64"), current_weights=current_w.fillna(0.0),
@@ -126,9 +138,12 @@ def plan_rebalance(strategy: Strategy, store: BarStore, broker: Broker, universe
     weights = limits.apply(clean_weights(strategy.target_weights(view), panel.tickers))
     weights = weights[weights != 0]
     need_px = sorted(set(weights.index) | set(current_qty.index))
-    prices = broker.latest_prices(need_px) if need_px else pd.Series(dtype="float64")
+    prices = _safe_latest_prices(broker, need_px)
     # fall back to last close from our own data when the broker has no quote
     last_close = panel.close.iloc[-1]
+    missing = [t for t in need_px if t not in prices.index or pd.isna(prices.get(t))]
+    if missing:
+        log.warning("no broker quote for %d symbols, using last close: %s", len(missing), ", ".join(missing[:10]))
     prices = prices.combine_first(last_close.reindex(need_px))
     current_w = (current_qty * prices.reindex(current_qty.index)) / acct.equity if acct.equity else current_qty * 0
     orders = compute_orders(weights, current_qty, prices, acct.equity, min_trade_notional,

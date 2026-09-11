@@ -101,6 +101,11 @@ def compute_metrics(equity: pd.Series, trades: pd.DataFrame | None = None,
         "n_days": len(equity),
     }
     m["calmar"] = m["cagr"] / abs(m["max_drawdown"]) if m["max_drawdown"] < 0 else 0.0
+    from .stats import honesty_report
+    h = honesty_report(r, periods_per_year)
+    m["sharpe_se"] = h.sharpe_se_annual
+    m["prob_sharpe_gt_zero"] = h.psr_zero
+    m["min_track_years_95pct"] = h.min_track_years
     if turnover is not None and len(turnover):
         m["annual_turnover"] = float(turnover.mean() * periods_per_year)
     m.update(trade_stats(trades))
@@ -124,6 +129,7 @@ _PCT = {"total_return", "cagr", "annual_vol", "max_drawdown", "best_day", "worst
         "win_rate", "benchmark_total_return", "benchmark_cagr", "benchmark_max_drawdown",
         "excess_cagr", "alpha_annual", "annual_turnover"}
 _MONEY = {"start_equity", "end_equity", "avg_win", "avg_loss", "total_commission"}
+_YEARS = {"min_track_years_95pct", "min_backtest_years"}
 
 
 def format_metrics(m: dict[str, float]) -> str:
@@ -133,6 +139,8 @@ def format_metrics(m: dict[str, float]) -> str:
             s = f"{v * 100:8.2f}%"
         elif k in _MONEY:
             s = f"{v:12,.2f}"
+        elif k in _YEARS:
+            s = f"{v:8.1f} yr" if v != float("inf") else "     inf"
         elif isinstance(v, float):
             s = f"{v:8.3f}"
         else:

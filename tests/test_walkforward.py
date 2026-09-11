@@ -1,3 +1,4 @@
+import numpy as np
 
 from algofun.backtest import BacktestConfig, walk_forward
 from algofun.strategies import SMACrossover
@@ -21,4 +22,9 @@ def test_walk_forward_folds_and_stitching():
     assert wf.equity.index[0] == p.dates[warm + 200]
     assert wf.benchmark is not None and len(wf.benchmark) == len(wf.equity)
     assert all(isinstance(x, dict) and x["slow"] == 50 for x in wf.folds["params"])
-    assert "Stitched" in wf.summary()
+    assert "Stitched" in wf.summary() and "Honesty check" in wf.summary()
+    assert wf.n_trials_per_fold == 2 and wf.n_trials_total == 2 * len(wf.folds)
+    assert 0.0 <= wf.parameter_drift <= 1.0
+    assert {"train_cagr", "test_cagr", "test_bars", "train_dsr", "n_trials"} <= set(wf.folds.columns)
+    assert wf.folds["train_dsr"].between(0, 1).all()
+    assert np.isfinite(wf.walk_forward_efficiency) or np.isnan(wf.walk_forward_efficiency)

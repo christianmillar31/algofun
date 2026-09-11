@@ -134,3 +134,34 @@ def test_with_retries_recovers_then_gives_up(monkeypatch):
     assert calls["n"] == 3
     with pytest.raises(RuntimeError):
         mod.with_retries(lambda: (_ for _ in ()).throw(RuntimeError("down")), attempts=2, base_delay=0)
+
+
+def test_cap_buys_to_cash_scales_only_buys():
+    from algofun.live import cap_buys_to_cash
+    prices = pd.Series({"A": 10.0, "B": 10.0, "C": 10.0})
+    orders = [Order("A", "buy", 10), Order("B", "buy", 10), Order("C", "sell", 5)]
+    # 200 to buy, 150 cash + 50 sale proceeds, no buffer -> fits exactly
+    out = cap_buys_to_cash(orders, prices, cash=150.0, equity=150.0, cash_buffer=0.0)
+    assert [o.quantity for o in out] == [10, 10, 5]
+    # with a 10% buffer on 150 equity: available 185 -> scale 0.925
+    orders = [Order("A", "buy", 10), Order("B", "buy", 10), Order("C", "sell", 5)]
+    out = cap_buys_to_cash(orders, prices, cash=150.0, equity=150.0, cash_buffer=0.10)
+    assert out[0].quantity == pytest.approx(9.25) and out[1].quantity == pytest.approx(9.25)
+    assert out[2].quantity == 5   # sells untouched
+    # no cash at all -> buys dropped, sells kept
+    out = cap_buys_to_cash([Order("A", "buy", 10), Order("C", "sell", 5)], prices, cash=0.0, equity=100.0,
+                           cash_buffer=0.5)
+    assert [o.side for o in out] == ["sell"]
+
+
+def test_plan_leaves_cash_buffer(tmp_path):
+    p = make_panel(n_tickers=3, n_days=320, seed=11, tickers=["A", "B", "C"])
+    store = BarStore(tmp_path / "cache")
+    for t in p.tickers:
+        store.save(t, pd.DataFrame({f: p.field(f)[t] for f in ("open", "high", "low", "close", "volume")}))
+    broker = PaperBroker(cash=1000.0)
+    broker.set_prices(p.close.iloc[-1])
+    strat = Momentum(lookback=126, skip=21, top_n=2, market_filter=None)
+    plan = plan_rebalance(strat, store, broker, p.tickers, force=True, cash_buffer=0.02)
+    notional = sum(o.quantity * plan.prices[o.ticker] for o in plan.orders)
+    assert notional == pytest.approx(1000.0 * 0.98, rel=1e-6)

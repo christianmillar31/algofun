@@ -98,6 +98,10 @@ jobs:
             --refresh --start 2000-01-01 --min-bars 300 \
             $EXECUTE_FLAG $FORCE_FLAG
 
+      - name: Let fills settle
+        if: env.EXECUTE_FLAG != ''
+        run: sleep 20
+
       - name: Account after
         if: always()
         run: algofun status --broker alpaca $LIVE_FLAG

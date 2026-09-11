@@ -107,10 +107,34 @@ def compute_orders(target_weights: pd.Series, current_qty: pd.Series, prices: pd
     return orders
 
 
+def cap_buys_to_cash(orders: list[Order], prices: pd.Series, cash: float, equity: float,
+                     cash_buffer: float = 0.005) -> list[Order]:
+    """Scale buy quantities so total buy notional never exceeds
+    cash + expected sell proceeds - cash_buffer * equity.
+
+    Market fills land a little above the reference price; without a buffer a
+    fully-invested target overspends by the slippage and a cash account
+    rejects the last order. Sells are never scaled.
+    """
+    buys = [o for o in orders if o.side == "buy"]
+    if not buys:
+        return orders
+    sell_notional = sum(o.quantity * float(prices.get(o.ticker, 0.0)) for o in orders if o.side == "sell")
+    buy_notional = sum(o.quantity * float(prices.get(o.ticker, 0.0)) for o in buys)
+    available = cash + sell_notional - cash_buffer * equity
+    if buy_notional <= available or buy_notional <= 0:
+        return orders
+    scale = max(available, 0.0) / buy_notional
+    log.warning("buys (%.2f) exceed available cash (%.2f); scaling buys by %.4f", buy_notional, available, scale)
+    for o in buys:
+        o.quantity = o.quantity * scale
+    return [o for o in orders if o.side == "sell" or o.quantity > 0]
+
+
 def plan_rebalance(strategy: Strategy, store: BarStore, broker: Broker, universe: Sequence[str],
                    limits: RiskLimits | None = None, min_trade_notional: float = 1.0,
                    min_trade_weight: float = 0.002, min_bars: int | None = None,
-                   force: bool = False) -> RebalancePlan:
+                   force: bool = False, cash_buffer: float = 0.005) -> RebalancePlan:
     """Build today's order list.
 
     Respects the strategy's rebalance schedule the same way the backtester
@@ -149,6 +173,11 @@ def plan_rebalance(strategy: Strategy, store: BarStore, broker: Broker, universe
     current_w = (current_qty * prices.reindex(current_qty.index)) / acct.equity if acct.equity else current_qty * 0
     orders = compute_orders(weights, current_qty, prices, acct.equity, min_trade_notional,
                             min_trade_weight, broker.supports_fractional)
+    orders = cap_buys_to_cash(orders, prices, acct.cash, acct.equity, cash_buffer)
+    if not broker.supports_fractional:
+        for o in orders:
+            o.quantity = float(int(o.quantity))
+        orders = [o for o in orders if o.quantity > 0]
     run_id = uuid.uuid4().hex[:8]   # unique per plan so retries within a run are idempotent
     for o in orders:
         o.client_order_id = f"algofun-{view.date:%Y%m%d}-{run_id}-{o.ticker}-{o.side}"

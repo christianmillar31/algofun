@@ -129,7 +129,7 @@ documents what the strategy needs.
 
 ### Run it from GitHub Actions (no server needed)
 
-`.github/workflows/rebalance.yml` runs every weekday at 22:00 UTC (after the
+`.github/workflows/rebalance.yml` runs every weekday at 22:17 UTC (after the
 close), refreshes the bar cache, and rebalances the **paper** account.
 
 1. In Alpaca, switch the dashboard to *Paper* and generate an API key pair.

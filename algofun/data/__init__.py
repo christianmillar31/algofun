@@ -1,3 +1,4 @@
+from .membership import all_members, load_membership, membership_mask, pit_universe
 from .sources import (
     BAR_COLUMNS,
     ChainedSource,
@@ -10,6 +11,7 @@ from .store import BarStore, Panel, import_long_csv
 from .universe import ETFS, MEGA_CAPS, resolve_universe, sector_map, sp500_tickers, to_yahoo_symbol
 
 __all__ = [
+    "all_members", "load_membership", "membership_mask", "pit_universe",
     "sector_map",
     "BAR_COLUMNS",
     "ETFS",

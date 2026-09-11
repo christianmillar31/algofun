@@ -199,6 +199,8 @@ def run_backtest(panel: Panel, strategy: Strategy, config: BacktestConfig | None
             view = MarketView(panel, i)
             raw = strategy.target_weights(view)
             w = clean_weights(raw, tickers)
+            if panel.membership is not None:
+                w[~panel.membership.iloc[i].to_numpy(dtype=bool)] = 0.0
             w = cfg.limits.apply(w, sectors=panel.sectors)
             pending = w.to_numpy(dtype="float64")
 

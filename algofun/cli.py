@@ -30,6 +30,8 @@ def _add_data_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--start", default=None)
     p.add_argument("--end", default=None)
     p.add_argument("--min-bars", type=int, default=0, help="drop tickers with fewer cached bars")
+    p.add_argument("--pit", action="store_true",
+                   help="point-in-time: only hold names that were in the S&P 500 on each date (universe defaults to sp500-pit)")
 
 
 def _add_backtest_args(p: argparse.ArgumentParser) -> None:
@@ -47,8 +49,14 @@ def _add_backtest_args(p: argparse.ArgumentParser) -> None:
 
 def _load_panel(args):
     store = BarStore(args.cache)
-    tickers = resolve_universe(args.universe, cache_dir=Path(args.cache) / "universe") if args.universe else None
+    universe = args.universe or ("sp500-pit" if args.pit else None)
+    tickers = resolve_universe(universe, cache_dir=Path(args.cache) / "universe") if universe else None
     panel = store.load_panel(tickers, min_bars=args.min_bars, sectors=sector_map(Path(args.cache) / "universe"))
+    if args.pit:
+        from .data import load_membership
+        panel = panel.with_membership(load_membership(Path(args.cache) / "universe"))
+        share = panel.membership.mean(axis=1).mean()
+        print(f"point-in-time membership attached: on average {share:.0%} of the {len(panel.tickers)} loaded names are eligible per day")
     if len(panel) == 0:
         sys.exit("no bars in cache; run `algofun fetch` or `algofun import-csv` first")
     return store, panel

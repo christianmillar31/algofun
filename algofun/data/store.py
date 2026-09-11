@@ -34,6 +34,7 @@ class Panel:
     close: pd.DataFrame
     volume: pd.DataFrame
     sectors: dict[str, str] = field(default_factory=dict)   # ticker -> sector, may be empty
+    membership: pd.DataFrame | None = None                   # date x ticker bool; None = everything eligible
 
     @property
     def tickers(self) -> list[str]:
@@ -50,11 +51,26 @@ class Panel:
         return getattr(self, name)
 
     def slice(self, start=None, end=None) -> Panel:
-        return Panel(**{f: getattr(self, f).loc[start:end] for f in BAR_COLUMNS}, sectors=self.sectors)
+        m = self.membership.loc[start:end] if self.membership is not None else None
+        return Panel(**{f: getattr(self, f).loc[start:end] for f in BAR_COLUMNS}, sectors=self.sectors, membership=m)
 
     def select(self, tickers: Sequence[str]) -> Panel:
         cols = [t for t in tickers if t in self.close.columns]
-        return Panel(**{f: getattr(self, f)[cols] for f in BAR_COLUMNS}, sectors=self.sectors)
+        m = self.membership[cols] if self.membership is not None else None
+        return Panel(**{f: getattr(self, f)[cols] for f in BAR_COLUMNS}, sectors=self.sectors, membership=m)
+
+    def eligible(self, i: int) -> pd.Series:
+        """Names eligible to be held at bar i: has a close, and (if known) was an index member."""
+        ok = self.close.iloc[i].notna()
+        if self.membership is not None:
+            ok = ok & self.membership.iloc[i].astype(bool)
+        return ok
+
+    def with_membership(self, membership: pd.DataFrame) -> Panel:
+        """Attach a point-in-time membership history (snapshot date -> ticker list)."""
+        from .membership import membership_mask
+        mask = membership_mask(membership, self.dates, self.tickers)
+        return Panel(**{f: getattr(self, f) for f in BAR_COLUMNS}, sectors=self.sectors, membership=mask)
 
     def sector_of(self, ticker: str) -> str:
         return self.sectors.get(ticker, "Unknown")

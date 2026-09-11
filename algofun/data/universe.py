@@ -111,6 +111,9 @@ def resolve_universe(spec: str, **kwargs) -> list[str]:
         key = part.strip().lower()
         if key == "sp500":
             out.update(sp500_tickers(**kwargs))
+        elif key in ("sp500-pit", "sp500_pit"):
+            from .membership import pit_universe
+            out.update(pit_universe(**kwargs))
         elif key == "etfs":
             out.update(ETFS)
         elif key == "megacaps":

@@ -88,5 +88,6 @@ class MarketView:
         return px.pct_change().iloc[1:]
 
     def tradable(self) -> pd.Series:
-        """Tickers with a valid close today."""
-        return self.last("close").notna()
+        """Tickers with a valid close today and, when a point-in-time membership
+        history is attached, in the index today."""
+        return self._panel.eligible(self._i)

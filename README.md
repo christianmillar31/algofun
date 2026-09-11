@@ -115,7 +115,15 @@ documents what the strategy needs.
    `--max-stale-sessions`; `--no-guards` disables everything and should never
    be in a scheduled job. `algofun flatten --broker alpaca --execute --yes`
    is the emergency exit: it cancels open orders and closes every position.
-6. **The rebalancer respects the strategy's schedule.** A monthly strategy
+6. **Three more safety rails.** A drawdown budget halves exposure 10% below
+   the equity peak and goes flat at 20%, in the backtest and live alike
+   (`--dd-halve`, `--dd-flat`, `--no-drawdown-control`). `algofun gate`
+   reports whether the paper record has at least 100 filled orders and 20
+   consecutive clean runs; `--live` refuses to trade until it does unless you
+   pass `--override-gate`. `algofun shortfall` compares every realised fill
+   with the price the plan was sized at, which is the only number that says
+   whether the backtest's cost model was honest.
+7. **The rebalancer respects the strategy's schedule.** A monthly strategy
    only trades on the last NYSE trading day of the month, exactly like the
    backtest. Pass `--force` for the first deployment or a manual reset.
 

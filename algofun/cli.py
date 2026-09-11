@@ -17,7 +17,7 @@ from pathlib import Path
 
 from .backtest import COST_PRESETS, BacktestConfig, run_backtest, walk_forward
 from .data import BarStore, import_long_csv, resolve_universe, sector_map
-from .risk import RiskLimits
+from .risk import DrawdownControl, RiskLimits
 from .strategies import STRATEGIES, get_strategy, parse_params
 
 log = logging.getLogger("algofun")
@@ -45,6 +45,17 @@ def _add_backtest_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--max-gross", type=float, default=1.0)
     p.add_argument("--max-sector", type=float, default=0.30, help="cap on any one sector's weight (needs sector map)")
     p.add_argument("--no-fractional", action="store_true", help="whole shares only")
+    _add_drawdown_args(p)
+
+
+def _add_drawdown_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--dd-halve", type=float, default=0.10, help="halve exposure at this drawdown from peak")
+    p.add_argument("--dd-flat", type=float, default=0.20, help="go flat at this drawdown from peak")
+    p.add_argument("--no-drawdown-control", action="store_true", help="disable the drawdown budget")
+
+
+def _drawdown_control(args):
+    return None if args.no_drawdown_control else DrawdownControl(halve_at=args.dd_halve, flat_at=args.dd_flat)
 
 
 def _load_panel(args):
@@ -69,7 +80,7 @@ def _config(args) -> BacktestConfig:
     return BacktestConfig(
         initial_cash=args.cash, costs=COST_PRESETS[args.costs](),
         limits=RiskLimits(max_weight=args.max_weight, max_gross=args.max_gross, max_sector_weight=args.max_sector),
-        allow_fractional=not args.no_fractional, rebalance=rb,
+        allow_fractional=not args.no_fractional, rebalance=rb, drawdown_control=_drawdown_control(args),
         benchmark=args.benchmark or None,
     )
 
@@ -197,8 +208,23 @@ def cmd_rebalance(args) -> None:
         panel = store.load_panel(tickers, min_bars=args.min_bars)
         broker.set_prices(panel.close.iloc[-1])
     limits = RiskLimits(max_weight=args.max_weight, max_gross=args.max_gross, max_sector_weight=args.max_sector)
+
+    # ---- live gate: no real money until the paper record clears the bar ----
+    if args.live and not args.override_gate:
+        from .live import gate_status
+        gs = gate_status(args.log, args.guard_log)
+        print(gs.describe())
+        if not gs.open:
+            print("\nREFUSED: paper gate is closed. Keep paper trading, or pass --override-gate deliberately.")
+            sys.exit(3)
+
+    # ---- drawdown budget from the equity record (local log + broker history) ----
+    acct0 = broker.account()
+    history = _equity_history(args.equity_log, broker, acct0.equity)
+    ctrl = _drawdown_control(args)
+    scale, dd = ctrl.scale_from_history(history, acct0.equity) if ctrl else (1.0, 0.0)
     plan = plan_rebalance(strat, store, broker, tickers, limits=limits, min_bars=args.min_bars,
-                          force=args.force, sectors=sectors)
+                          force=args.force, sectors=sectors, exposure_scale=scale, drawdown=dd)
     print(f"broker={broker.name}  strategy={strat.describe()}")
     print(plan.describe())
 
@@ -208,6 +234,9 @@ def cmd_rebalance(args) -> None:
     last_state = load_state(args.ledger)
     report = run_guards(plan, acct, positions, _guardrails(args), last_state=last_state)
     print(report.describe())
+    _append_jsonl(args.guard_log, {"ts": _now_iso(), "as_of": str(plan.as_of.date()), "broker": broker.name,
+                                   "passed": report.passed, "failures": report.failures, "orders": len(plan.orders),
+                                   "execute": bool(args.execute), "equity": acct.equity})
     if not report.passed:
         print("\nBLOCKED: no orders submitted. Review the failures above; use --no-guards only deliberately.")
         sys.exit(2)
@@ -225,7 +254,7 @@ def cmd_rebalance(args) -> None:
                 print("market is closed: DAY orders will queue for the next open (this matches the backtest)")
         except Exception as e:  # noqa: BLE001 - informational only
             print(f"could not read the market clock ({e}); submitting anyway")
-    results = execute_plan(plan, broker, log_path=args.log)
+    results = execute_plan(plan, broker, log_path=args.log, settle_seconds=args.settle)
     for r in results:
         print(f"  {r.order.side:<4} {r.order.ticker:<6} {r.order.quantity:>10.4f}  {r.status}"
               f"{'  @ ' + format(r.filled_price, '.2f') if r.filled_price else ''}  {r.message}")
@@ -233,6 +262,64 @@ def cmd_rebalance(args) -> None:
     print(f"account: cash={acct.cash:,.2f} equity={acct.equity:,.2f}")
     save_state(args.ledger, snapshot_state(broker, plan, results))
     print(f"state snapshot written to {args.ledger}")
+
+
+def _now_iso() -> str:
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _append_jsonl(path, row: dict) -> None:
+    import json
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with p.open("a") as f:
+        f.write(json.dumps(row, default=str) + "\n")
+
+
+def _equity_history(path, broker, current_equity: float) -> list[float]:
+    """Local daily equity record (one row per run day) merged with the broker's own history."""
+    import json
+
+    import pandas as pd
+    rows = {}
+    p = Path(path)
+    if p.exists():
+        for line in p.read_text().splitlines():
+            try:
+                r = json.loads(line)
+                rows[str(pd.Timestamp(r["as_of"]).date())] = float(r["equity"])
+            except (ValueError, KeyError):
+                continue
+    hist = broker.equity_history()
+    if hist is not None:
+        for d, v in hist.items():
+            rows.setdefault(str(pd.Timestamp(d).date()), float(v))
+    today = _now_iso()[:10]
+    if today not in rows:
+        _append_jsonl(path, {"as_of": today, "equity": current_equity, "ts": _now_iso()})
+    rows[today] = current_equity
+    return [rows[k] for k in sorted(rows)]
+
+
+def cmd_gate(args) -> None:
+    from .live import gate_status
+    gs = gate_status(args.log, args.guard_log, min_fills=args.min_fills, min_sessions=args.min_sessions)
+    print(gs.describe())
+    sys.exit(0 if gs.open else 1)
+
+
+def cmd_shortfall(args) -> None:
+    from .live import shortfall_report
+    rep = shortfall_report(args.log)
+    if rep["n"] == 0:
+        print("no fills with both a modelled and a realised price yet")
+        return
+    print(f"implementation shortfall over {rep['n']} fills:")
+    print(f"  mean   {rep['mean_bps']:8.1f} bps   median {rep['median_bps']:8.1f} bps   total cost {rep['total_cost']:,.2f}")
+    print("  worst five:")
+    for r in rep["worst"]:
+        print(f"    {r['as_of']} {r['side']:<4} {r['ticker']:<6} modelled {r['modelled']:9.2f} filled {r['filled']:9.2f}  {r['slip_bps']:7.1f} bps")
 
 
 def cmd_flatten(args) -> None:
@@ -387,7 +474,25 @@ def build_parser() -> argparse.ArgumentParser:
                            help="block if the latest bar is older than this many trading days")
             g.add_argument("--no-reconcile", action="store_true", help="skip the position reconciliation check")
             g.add_argument("--no-guards", action="store_true", help="disable every guard (do not do this casually)")
+            g.add_argument("--guard-log", default="runs/guard_log.jsonl")
+            g.add_argument("--equity-log", default="runs/equity_log.jsonl")
+            g.add_argument("--settle", type=float, default=0.0,
+                           help="seconds to wait after submitting before refreshing fills for the log (Alpaca: 20)")
+            g.add_argument("--override-gate", action="store_true",
+                           help="allow --live even though the paper gate is closed")
+            _add_drawdown_args(r)
         r.set_defaults(func=fn)
+
+    gt = sub.add_parser("gate", help="is the paper record good enough to go live?")
+    gt.add_argument("--log", default="runs/rebalance_log.jsonl")
+    gt.add_argument("--guard-log", default="runs/guard_log.jsonl")
+    gt.add_argument("--min-fills", type=int, default=100)
+    gt.add_argument("--min-sessions", type=int, default=20)
+    gt.set_defaults(func=cmd_gate)
+
+    sf = sub.add_parser("shortfall", help="realised fills vs the prices the plan was sized at")
+    sf.add_argument("--log", default="runs/rebalance_log.jsonl")
+    sf.set_defaults(func=cmd_shortfall)
     return p
 
 

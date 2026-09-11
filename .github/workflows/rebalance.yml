@@ -102,12 +102,14 @@ jobs:
         run: |
           algofun rebalance --broker alpaca $LIVE_FLAG \
             --strategy "$STRATEGY" --params "$PARAMS" --universe "$UNIVERSE" \
-            --refresh --start 2000-01-01 --min-bars 300 \
+            --refresh --start 2000-01-01 --min-bars 300 --settle 20 \
             $EXECUTE_FLAG $FORCE_FLAG
 
-      - name: Let fills settle
-        if: env.EXECUTE_FLAG != ''
-        run: sleep 20
+      - name: Paper gate and shortfall
+        if: always()
+        run: |
+          algofun gate || true
+          algofun shortfall || true
 
       - name: Account after
         if: always()

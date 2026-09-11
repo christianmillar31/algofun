@@ -41,8 +41,8 @@ def test_buy_and_hold_tracks_price_with_zero_costs():
 
 def test_costs_reduce_equity(panel):
     s = Constant(weights={"T0": 0.5, "T1": 0.5})
-    free = run_backtest(panel, s, BacktestConfig(costs=CostModel.zero(), benchmark=None))
-    paid = run_backtest(panel, s, BacktestConfig(costs=CostModel.pessimistic(), benchmark=None))
+    free = run_backtest(panel, s, BacktestConfig(costs=CostModel.zero(), benchmark=None, drawdown_control=None))
+    paid = run_backtest(panel, s, BacktestConfig(costs=CostModel.pessimistic(), benchmark=None, drawdown_control=None))
     assert paid.equity.iloc[-1] < free.equity.iloc[-1]
 
 

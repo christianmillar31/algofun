@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -37,6 +38,8 @@ class RebalancePlan:
     prices: pd.Series
     results: list[OrderResult] = field(default_factory=list)
     skipped: str | None = None   # set when the schedule says "not today"
+    exposure_scale: float = 1.0  # < 1 when the drawdown budget is de-risking
+    drawdown: float = 0.0
 
     def to_frame(self) -> pd.DataFrame:
         rows = []
@@ -52,6 +55,8 @@ class RebalancePlan:
     def describe(self) -> str:
         head = (f"as of {self.as_of.date()}  equity={self.equity:,.2f}  cash={self.cash:,.2f}  "
                 f"targets={int((self.target_weights != 0).sum())} names  orders={len(self.orders)}")
+        if self.exposure_scale < 1.0:
+            head += f"\n  drawdown budget: {self.drawdown:.1%} from peak -> exposure x{self.exposure_scale:.2f}"
         if self.skipped:
             return head + f"\n  skipped: {self.skipped}"
         if not self.orders:
@@ -135,7 +140,8 @@ def plan_rebalance(strategy: Strategy, store: BarStore, broker: Broker, universe
                    limits: RiskLimits | None = None, min_trade_notional: float = 1.0,
                    min_trade_weight: float = 0.002, min_bars: int | None = None,
                    force: bool = False, cash_buffer: float = 0.005,
-                   sectors: dict[str, str] | None = None) -> RebalancePlan:
+                   sectors: dict[str, str] | None = None, exposure_scale: float = 1.0,
+                   drawdown: float = 0.0) -> RebalancePlan:
     """Build today's order list.
 
     Respects the strategy's rebalance schedule the same way the backtester
@@ -162,6 +168,7 @@ def plan_rebalance(strategy: Strategy, store: BarStore, broker: Broker, universe
                                      f"(next trading day {next_trading_day(view.date).date()}); use force to override")
 
     weights = limits.apply(clean_weights(strategy.target_weights(view), panel.tickers), sectors=panel.sectors)
+    weights = weights * float(exposure_scale)
     weights = weights[weights != 0]
     need_px = sorted(set(weights.index) | set(current_qty.index))
     prices = _safe_latest_prices(broker, need_px)
@@ -183,12 +190,21 @@ def plan_rebalance(strategy: Strategy, store: BarStore, broker: Broker, universe
     for o in orders:
         o.client_order_id = f"algofun-{view.date:%Y%m%d}-{run_id}-{o.ticker}-{o.side}"
     return RebalancePlan(as_of=view.date, equity=acct.equity, cash=acct.cash, target_weights=weights,
-                         current_weights=current_w.fillna(0.0), orders=orders, prices=prices)
+                         current_weights=current_w.fillna(0.0), orders=orders, prices=prices,
+                         exposure_scale=float(exposure_scale), drawdown=float(drawdown))
 
 
-def execute_plan(plan: RebalancePlan, broker: Broker, log_path: str | Path | None = "runs/rebalance_log.jsonl"
-                 ) -> list[OrderResult]:
+def execute_plan(plan: RebalancePlan, broker: Broker, log_path: str | Path | None = "runs/rebalance_log.jsonl",
+                 settle_seconds: float = 0.0) -> list[OrderResult]:
+    """Submit, optionally wait for asynchronous fills, refresh statuses, log.
+
+    Each log row carries the price the plan was sized at (`modelled_price`)
+    beside the realised fill, which is what the shortfall report compares.
+    """
     results = broker.submit_all(plan.orders)
+    if settle_seconds > 0 and any(r.status not in ("filled", "rejected") for r in results):
+        time.sleep(settle_seconds)
+        results = broker.refresh(results)
     plan.results = results
     if log_path:
         p = Path(log_path)
@@ -200,5 +216,7 @@ def execute_plan(plan: RebalancePlan, broker: Broker, log_path: str | Path | Non
                     "as_of": str(plan.as_of.date()), "ticker": r.order.ticker, "side": r.order.side,
                     "quantity": r.order.quantity, "status": r.status, "filled_quantity": r.filled_quantity,
                     "filled_price": r.filled_price, "order_id": r.order_id, "message": r.message,
+                    "modelled_price": float(plan.prices.get(r.order.ticker, float("nan"))),
+                    "exposure_scale": plan.exposure_scale,
                 }) + "\n")
     return results

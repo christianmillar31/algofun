@@ -155,6 +155,33 @@ class AlpacaBroker(Broker):
                 return OrderResult(order, "", "rejected", message=msg)
         return self._result(order, o)
 
+    def refresh(self, results: list[OrderResult]) -> list[OrderResult]:
+        for r in results:
+            if not r.order_id or r.status in ("filled", "rejected", "unknown"):
+                continue
+            try:
+                o = with_retries(partial(self.trading.get_order_by_id, r.order_id), attempts=2,
+                                 what=f"refresh {r.order.ticker}")
+            except Exception as e:  # noqa: BLE001
+                log.warning("could not refresh order %s: %s", r.order_id, e)
+                continue
+            fresh = self._result(r.order, o)
+            r.status, r.filled_quantity, r.filled_price = fresh.status, fresh.filled_quantity, fresh.filled_price
+        return results
+
+    def equity_history(self) -> pd.Series | None:
+        try:
+            from alpaca.trading.requests import GetPortfolioHistoryRequest
+            h = with_retries(partial(self.trading.get_portfolio_history,
+                                     GetPortfolioHistoryRequest(period="1A", timeframe="1D")),
+                             attempts=2, what="portfolio history")
+            ts = pd.to_datetime(list(h.timestamp), unit="s").normalize()
+            eq = pd.Series([float(x) if x is not None else float("nan") for x in h.equity], index=ts).dropna()
+            return eq[eq > 0]
+        except Exception as e:  # noqa: BLE001
+            log.warning("portfolio history unavailable: %s", e)
+            return None
+
     @staticmethod
     def _result(order: Order, o) -> OrderResult:
         filled = float(o.filled_qty or 0)

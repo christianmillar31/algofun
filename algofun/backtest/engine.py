@@ -22,6 +22,7 @@ import numpy as np
 import pandas as pd
 
 from ..data.store import Panel
+from ..risk.drawdown import DrawdownControl
 from ..risk.limits import RiskLimits
 from ..strategies.base import Strategy, clean_weights
 from .costs import CostModel
@@ -44,6 +45,9 @@ class BacktestConfig:
     min_trade_weight: float = 0.002
     # never fill more than this share of the bar's volume in one name; the rest is dropped
     max_volume_share: float | None = 0.05
+    # portfolio drawdown budget (e.g. DrawdownControl(): halve exposure 10% off the peak, flat at 20%).
+    # None here; the CLI turns it on by default for backtest and live alike so the two stay in parity.
+    drawdown_control: DrawdownControl | None = None
     rebalance: str | int | None = None  # override the strategy's schedule
     benchmark: str | None = "SPY"     # ticker in the panel to compare against
 
@@ -130,6 +134,7 @@ def run_backtest(panel: Panel, strategy: Strategy, config: BacktestConfig | None
     strategy.reset()
 
     cash = float(cfg.initial_cash)
+    peak_equity = float(cfg.initial_cash)
     shares = np.zeros(n_t)
     pending: np.ndarray | None = None  # target weights decided at previous close
 
@@ -196,6 +201,7 @@ def run_backtest(panel: Panel, strategy: Strategy, config: BacktestConfig | None
 
         # ---- 2. mark to market at the close --------------------------------
         equity = cash + float(np.nansum(shares * mark_px[i]))
+        peak_equity = max(peak_equity, equity)
         eq_rec[k] = equity
         cash_rec[k] = cash
         pos_rec[k] = shares
@@ -209,6 +215,8 @@ def run_backtest(panel: Panel, strategy: Strategy, config: BacktestConfig | None
             if panel.membership is not None:
                 w[~panel.membership.iloc[i].to_numpy(dtype=bool)] = 0.0
             w = cfg.limits.apply(w, sectors=panel.sectors)
+            if cfg.drawdown_control is not None and peak_equity > 0:
+                w = w * cfg.drawdown_control.scale(1.0 - equity / peak_equity)
             pending = w.to_numpy(dtype="float64")
 
     idx = dates[first:last + 1]

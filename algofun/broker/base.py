@@ -79,6 +79,15 @@ class Broker(ABC):
     def cancel_open_orders(self) -> int:
         return 0
 
+    def refresh(self, results: list[OrderResult]) -> list[OrderResult]:
+        """Update statuses/fills of recently submitted orders (brokers that fill
+        asynchronously override this). Default: nothing to do."""
+        return results
+
+    def equity_history(self) -> pd.Series | None:
+        """Daily account equity history if the broker can provide one (date -> equity)."""
+        return None
+
     def flatten(self) -> list[OrderResult]:
         """Close every position with market orders. The emergency exit."""
         self.cancel_open_orders()

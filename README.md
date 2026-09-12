@@ -137,9 +137,11 @@ point-in-time S&P 500 membership, retail costs:
 | Momentum (12-1, top 10, monthly) | 10.3% | 0.71 | -11.6% | 5.6x | 9.9% | 9.6% |
 | SPY buy and hold | 22.2% | 1.42 | -18.8% | | | |
 
-Walk-forward on the tone variant (six configurations per fold, seven
-folds, 42 trials counted): out-of-sample Sharpe -0.17 +/- 0.76,
-walk-forward efficiency -0.22, in-sample deflated Sharpe 0.63. Negativity
+Walk-forward, six configurations per fold, seven folds, 42 trials counted
+per variant: tone gives an out-of-sample Sharpe of -0.17 +/- 0.76 with
+walk-forward efficiency -0.22 and in-sample deflated Sharpe 0.63;
+negativity gives -0.08 +/- 0.76, efficiency -0.27, deflated Sharpe 0.42,
+with the chosen parameters switching in a third of the folds. Negativity
 alone, the half of the dictionary Loughran & McDonald found informative,
 is marginally positive at one times costs and zero within its standard
 error of 0.53; the cost table says each 1x of costs is worth about 4.6% a

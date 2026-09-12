@@ -106,8 +106,10 @@ def build_daily_features(store, lexicon: Lexicon, dates: pd.DatetimeIndex, ticke
     scored = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
     feats = daily_sentiment(scored, idx, tickers)
     count = feats["news_count"]
-    if len(scored):
-        first, last = scored["session"].min(), scored["session"].max()
+    months = [m.tz_localize(None) for m in store.months()]
+    if len(scored) and months:
+        first = max(months[0], scored["session"].min())
+        last = min(months[-1] + pd.offsets.MonthEnd(1), scored["session"].max())
         window = count.loc[max(first, idx[0]):min(last, idx[-1])]   # only the span the news covers
     else:
         first = last = None

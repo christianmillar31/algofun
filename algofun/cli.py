@@ -32,6 +32,8 @@ def _add_data_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--min-bars", type=int, default=0, help="drop tickers with fewer cached bars")
     p.add_argument("--pit", action="store_true",
                    help="point-in-time: only hold names that were in the S&P 500 on each date (universe defaults to sp500-pit)")
+    p.add_argument("--news", action="store_true",
+                   help="attach Loughran-McDonald news-sentiment features from the news cache (see `fetch-news`)")
 
 
 def _add_backtest_args(p: argparse.ArgumentParser) -> None:
@@ -58,6 +60,22 @@ def _drawdown_control(args):
     return None if args.no_drawdown_control else DrawdownControl(halve_at=args.dd_halve, flat_at=args.dd_flat)
 
 
+def _attach_news(panel, args):
+    """Score the cached news with the Loughran-McDonald lexicon and attach the
+    date x ticker features to the panel. Same code path for backtest and live."""
+    from .data.news import NewsStore
+    from .text import build_daily_features, load_lm_lexicon
+    news = NewsStore(args.cache)
+    if not news.months():
+        sys.exit("no news in cache; run `algofun fetch-news --start YYYY-MM-DD` first")
+    lex = load_lm_lexicon(Path(args.cache) / "text")
+    feats, info = build_daily_features(news, lex, panel.dates, panel.tickers)
+    print(f"news: {info['articles']:,} articles scored ({info['first']} -> {info['last']}), "
+          f"{info['ticker_days_with_news']:.0%} of ticker-days carry news, lexicon: "
+          f"{len(lex.positive)} positive / {len(lex.negative)} negative words")
+    return panel.with_features(feats)
+
+
 def _load_panel(args):
     store = BarStore(args.cache)
     universe = args.universe or ("sp500-pit" if args.pit else None)
@@ -70,6 +88,8 @@ def _load_panel(args):
         print(f"point-in-time membership attached: on average {share:.0%} of the {len(panel.tickers)} loaded names are eligible per day")
     if len(panel) == 0:
         sys.exit("no bars in cache; run `algofun fetch` or `algofun import-csv` first")
+    if getattr(args, "news", False):
+        panel = _attach_news(panel, args)
     return store, panel
 
 
@@ -96,6 +116,48 @@ def cmd_fetch(args) -> None:
     print(f"cached {len(ok)} tickers, {sum(ok.values()):,} bars total")
     if missing:
         print(f"no data for {len(missing)}: {', '.join(missing[:20])}{'...' if len(missing) > 20 else ''}")
+
+
+def cmd_fetch_news(args) -> None:
+    import pandas as pd
+
+    from .data.news import NewsStore
+    store = NewsStore(args.cache)
+    symbols = [t.strip().upper() for t in args.symbols.split(",") if t.strip()] if args.symbols else None
+    budget = f", budget {args.max_minutes:g} min" if args.max_minutes else ""
+    print(f"fetching news from {args.start} to {args.end or 'now'} via Alpaca -> {store.news_dir}{budget}")
+    counts = store.update(args.start, args.end, symbols=symbols, max_minutes=args.max_minutes)
+    cov = store.coverage()
+    total = int(cov["articles"].sum()) if len(cov) else 0
+    print(f"cached {total:,} articles over {len(cov)} months; touched this run: "
+          f"{', '.join(f'{k}={v:,}' for k, v in counts.items()) or 'nothing'}")
+    if len(cov):
+        tail = cov.tail(6)
+        for _, r in tail.iterrows():
+            last = r["last_created"].strftime("%Y-%m-%d %H:%M UTC") if pd.notna(r["last_created"]) else "-"
+            print(f"  {r['month']}  {int(r['articles']):>8,} articles   last {last}")
+
+
+def cmd_sentiment(args) -> None:
+    """Today's news-tone ranking: what the sentiment strategy would rank right now."""
+    args.news = True
+    _, panel = _load_panel(args)
+    if args.start or args.end:
+        panel = panel.slice(args.start, args.end)
+    from .backtest import MarketView
+    strat = get_strategy("sentiment", **parse_params(args.params))
+    view = MarketView(panel, len(panel) - 1)
+    sc = strat.scores(view).dropna()
+    sc = sc[sc["articles"] >= int(strat.min_articles)]
+    print(f"as of {view.date.date()}: {int(sc['articles'].sum()):,} articles over the last {strat.lookback} sessions, "
+          f"{len(sc)} names with >= {strat.min_articles} articles (score = {strat.score})")
+    if sc.empty:
+        return
+    for label, block in (("most positive", sc.sort_values("score", ascending=False).head(args.top)),
+                         ("most negative", sc.sort_values("score").head(args.top))):
+        print(f"  {label}:")
+        for t, r in block.iterrows():
+            print(f"    {t:<6} score {r['score']:+.3f}  articles {int(r['articles']):>4}  {panel.sector_of(t)}")
 
 
 def cmd_import_csv(args) -> None:
@@ -223,8 +285,9 @@ def cmd_rebalance(args) -> None:
     history = _equity_history(args.equity_log, broker, acct0.equity)
     ctrl = _drawdown_control(args)
     scale, dd = ctrl.scale_from_history(history, acct0.equity) if ctrl else (1.0, 0.0)
+    attach = (lambda p: _attach_news(p, args)) if args.news else None
     plan = plan_rebalance(strat, store, broker, tickers, limits=limits, min_bars=args.min_bars,
-                          force=args.force, sectors=sectors, exposure_scale=scale, drawdown=dd)
+                          force=args.force, sectors=sectors, exposure_scale=scale, drawdown=dd, attach=attach)
     print(f"broker={broker.name}  strategy={strat.describe()}")
     print(plan.describe())
 
@@ -406,6 +469,21 @@ def build_parser() -> argparse.ArgumentParser:
     f.add_argument("--cache", default="data/cache")
     f.add_argument("--force", action="store_true", help="re-download full history")
     f.set_defaults(func=cmd_fetch)
+
+    fn = sub.add_parser("fetch-news", help="download Alpaca (Benzinga) news into the cache, month by month")
+    fn.add_argument("--start", default="2023-01-01")
+    fn.add_argument("--end", default=None)
+    fn.add_argument("--cache", default="data/cache")
+    fn.add_argument("--symbols", default=None, help="comma list to filter server-side (default: everything)")
+    fn.add_argument("--max-minutes", type=float, default=None,
+                    help="stop cleanly after this long; finished months are kept and the next run resumes")
+    fn.set_defaults(func=cmd_fetch_news)
+
+    sn = sub.add_parser("sentiment", help="today's Loughran-McDonald news-tone ranking from the cache")
+    _add_data_args(sn)
+    sn.add_argument("--params", default=None, help="sentiment strategy params (lookback, min_articles, score)")
+    sn.add_argument("--top", type=int, default=10)
+    sn.set_defaults(func=cmd_sentiment)
 
     i = sub.add_parser("import-csv", help="bulk import a long-format CSV (date,open,high,low,close,volume,Name)")
     i.add_argument("path")

@@ -2,14 +2,15 @@ from __future__ import annotations
 
 from typing import Any
 
-from .base import Strategy, clean_weights
+from .base import Strategy, clean_weights, pick_top
 from .buy_and_hold import BuyAndHold
 from .mean_reversion import MeanReversion
 from .momentum import Momentum
+from .sentiment import Sentiment
 from .sma_crossover import SMACrossover
 
 STRATEGIES: dict[str, type[Strategy]] = {
-    cls.name: cls for cls in (BuyAndHold, SMACrossover, Momentum, MeanReversion)
+    cls.name: cls for cls in (BuyAndHold, SMACrossover, Momentum, MeanReversion, Sentiment)
 }
 
 
@@ -48,8 +49,10 @@ __all__ = [
     "MeanReversion",
     "Momentum",
     "SMACrossover",
+    "Sentiment",
     "Strategy",
     "clean_weights",
     "get_strategy",
     "parse_params",
+    "pick_top",
 ]

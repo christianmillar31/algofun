@@ -10,7 +10,7 @@ import json
 import logging
 import time
 import uuid
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,7 +19,7 @@ import pandas as pd
 
 from ..backtest.view import MarketView
 from ..broker.base import Broker, Order, OrderResult
-from ..data.store import BarStore
+from ..data.store import BarStore, Panel
 from ..risk.limits import RiskLimits
 from ..strategies.base import Strategy, clean_weights
 from .calendar import is_rebalance_day, next_trading_day
@@ -141,15 +141,19 @@ def plan_rebalance(strategy: Strategy, store: BarStore, broker: Broker, universe
                    min_trade_weight: float = 0.002, min_bars: int | None = None,
                    force: bool = False, cash_buffer: float = 0.005,
                    sectors: dict[str, str] | None = None, exposure_scale: float = 1.0,
-                   drawdown: float = 0.0) -> RebalancePlan:
+                   drawdown: float = 0.0, attach: Callable[[Panel], Panel] | None = None) -> RebalancePlan:
     """Build today's order list.
 
     Respects the strategy's rebalance schedule the same way the backtester
     does: on a non-rebalance day the plan is empty and `plan.skipped` says
     why. `force=True` overrides that (first deployment, manual runs).
+    `attach` decorates the loaded panel (news features, ...) before the
+    strategy sees it, so live and backtest read the same inputs.
     """
     limits = limits or RiskLimits()
     panel = store.load_panel(list(universe), min_bars=min_bars or 0, sectors=sectors)
+    if attach is not None:
+        panel = attach(panel)
     if len(panel) <= strategy.warmup:
         raise ValueError(f"need > {strategy.warmup} bars of history, have {len(panel)}; run `algofun fetch`")
     view = MarketView(panel, len(panel) - 1)

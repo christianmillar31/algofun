@@ -35,6 +35,7 @@ class Panel:
     volume: pd.DataFrame
     sectors: dict[str, str] = field(default_factory=dict)   # ticker -> sector, may be empty
     membership: pd.DataFrame | None = None                   # date x ticker bool; None = everything eligible
+    features: dict[str, pd.DataFrame] = field(default_factory=dict)  # name -> date x ticker frame, aligned
 
     @property
     def tickers(self) -> list[str]:
@@ -52,12 +53,16 @@ class Panel:
 
     def slice(self, start=None, end=None) -> Panel:
         m = self.membership.loc[start:end] if self.membership is not None else None
-        return Panel(**{f: getattr(self, f).loc[start:end] for f in BAR_COLUMNS}, sectors=self.sectors, membership=m)
+        feats = {k: v.loc[start:end] for k, v in self.features.items()}
+        return Panel(**{f: getattr(self, f).loc[start:end] for f in BAR_COLUMNS}, sectors=self.sectors,
+                     membership=m, features=feats)
 
     def select(self, tickers: Sequence[str]) -> Panel:
         cols = [t for t in tickers if t in self.close.columns]
         m = self.membership[cols] if self.membership is not None else None
-        return Panel(**{f: getattr(self, f)[cols] for f in BAR_COLUMNS}, sectors=self.sectors, membership=m)
+        feats = {k: v.reindex(columns=cols) for k, v in self.features.items()}
+        return Panel(**{f: getattr(self, f)[cols] for f in BAR_COLUMNS}, sectors=self.sectors,
+                     membership=m, features=feats)
 
     def eligible(self, i: int) -> pd.Series:
         """Names eligible to be held at bar i: has a close, and (if known) was an index member."""
@@ -70,7 +75,24 @@ class Panel:
         """Attach a point-in-time membership history (snapshot date -> ticker list)."""
         from .membership import membership_mask
         mask = membership_mask(membership, self.dates, self.tickers)
-        return Panel(**{f: getattr(self, f) for f in BAR_COLUMNS}, sectors=self.sectors, membership=mask)
+        return Panel(**{f: getattr(self, f) for f in BAR_COLUMNS}, sectors=self.sectors, membership=mask,
+                     features=self.features)
+
+    def with_features(self, features: dict[str, pd.DataFrame], fill_value: float = 0.0) -> Panel:
+        """Attach named date x ticker frames (news sentiment, anything external),
+        re-aligned to this panel's dates and tickers. Missing cells take `fill_value`."""
+        aligned = {}
+        for name, df in features.items():
+            f = df.reindex(index=self.dates, columns=self.tickers)
+            aligned[name] = f.fillna(fill_value) if fill_value is not None else f
+        return Panel(**{f: getattr(self, f) for f in BAR_COLUMNS}, sectors=self.sectors,
+                     membership=self.membership, features={**self.features, **aligned})
+
+    def feature(self, name: str) -> pd.DataFrame:
+        try:
+            return self.features[name]
+        except KeyError:
+            raise KeyError(f"panel has no feature {name!r}; available: {sorted(self.features)}") from None
 
     def sector_of(self, ticker: str) -> str:
         return self.sectors.get(ticker, "Unknown")

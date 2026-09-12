@@ -4,7 +4,7 @@ import pandas as pd
 
 from ..backtest.view import MarketView
 from ..risk.sizing import equal_weight, inverse_vol, vol_target
-from .base import Strategy
+from .base import Strategy, pick_top
 
 
 class Momentum(Strategy):
@@ -55,16 +55,4 @@ class Momentum(Strategy):
 
     def _select(self, ranked, view: MarketView) -> list[str]:
         """Top N by score, taking at most max_per_sector from any known sector."""
-        cap = int(self.max_per_sector or 0)
-        if cap <= 0 or not view.sectors:
-            return list(ranked[: self.top_n])
-        names, counts = [], {}
-        for t in ranked:
-            s = view.sector_of(t)
-            if s != "Unknown" and counts.get(s, 0) >= cap:
-                continue
-            names.append(t)
-            counts[s] = counts.get(s, 0) + 1
-            if len(names) >= self.top_n:
-                break
-        return names
+        return pick_top(ranked, view, int(self.top_n), int(self.max_per_sector or 0))

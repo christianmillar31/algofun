@@ -87,6 +87,24 @@ class MarketView:
         px = self.history(field, lookback + 1)
         return px.pct_change().iloc[1:]
 
+    # ---- external features (news sentiment, ...) --------------------------
+    @property
+    def features(self) -> list[str]:
+        """Names of the date x ticker features attached to the panel."""
+        return sorted(self._panel.features)
+
+    def has_feature(self, name: str) -> bool:
+        return name in self._panel.features
+
+    def feature(self, field: str, lookback: int | None = None) -> pd.DataFrame:
+        """A feature frame up to and including today, exactly like `history`.
+        Features are aligned to bars, so a value on date d is what was known at
+        d's close (see algofun.text.sentiment.session_dates for how news is mapped)."""
+        df = self._panel.feature(field)
+        stop = self._i + 1
+        start = 0 if lookback is None else max(0, stop - lookback)
+        return df.iloc[start:stop]
+
     def tradable(self) -> pd.Series:
         """Tickers with a valid close today and, when a point-in-time membership
         history is attached, in the index today."""

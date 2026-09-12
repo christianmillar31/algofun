@@ -39,6 +39,10 @@ on:
       universe:
         description: "universe spec"
         default: "sp500+etfs"
+      news:
+        description: "attach news sentiment features (needed by the sentiment strategy)"
+        type: boolean
+        default: false
 
 concurrency:
   group: rebalance
@@ -55,6 +59,7 @@ jobs:
       UNIVERSE: ${{ inputs.universe || 'sp500+etfs' }}
       EXECUTE_FLAG: ${{ (github.event_name == 'schedule' || inputs.execute) && '--execute' || '' }}
       FORCE_FLAG: ${{ inputs.force && '--force' || '' }}
+      NEWS_FLAG: ${{ inputs.news && '--news' || '' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -99,12 +104,16 @@ jobs:
       - name: Account before
         run: algofun status --broker alpaca $LIVE_FLAG
 
+      - name: Refresh news (sentiment strategies only)
+        if: ${{ inputs.news }}
+        run: algofun fetch-news --start "$(date -u -d '90 days ago' +%Y-%m-01)" --max-minutes 20
+
       - name: Rebalance
         run: |
           algofun rebalance --broker alpaca $LIVE_FLAG \
             --strategy "$STRATEGY" --params "$PARAMS" --universe "$UNIVERSE" \
             --refresh --start 2000-01-01 --min-bars 300 --settle 20 \
-            $EXECUTE_FLAG $FORCE_FLAG
+            $EXECUTE_FLAG $FORCE_FLAG $NEWS_FLAG
 
       - name: Paper gate and shortfall
         if: always()

@@ -15,6 +15,7 @@ dependencies = [
     "pyarrow>=14",
     "yfinance>=0.2.40",
     "requests>=2.31",
+    "tzdata>=2024.1",
 ]
 
 [project.optional-dependencies]

@@ -67,6 +67,24 @@ class Strategy(ABC):
         return [dict(zip(keys, vals, strict=True)) for vals in itertools.product(*(cls.param_grid[k] for k in keys))]
 
 
+def pick_top(ranked, view: MarketView, top_n: int, max_per_sector: int = 0) -> list[str]:
+    """First `top_n` names from `ranked` (best first), taking at most `max_per_sector`
+    from any known sector. Names with an unknown sector are never capped."""
+    if max_per_sector <= 0 or not view.sectors:
+        return list(ranked[:top_n])
+    names: list[str] = []
+    counts: dict[str, int] = {}
+    for t in ranked:
+        s = view.sector_of(t)
+        if s != "Unknown" and counts.get(s, 0) >= max_per_sector:
+            continue
+        names.append(t)
+        counts[s] = counts.get(s, 0) + 1
+        if len(names) >= top_n:
+            break
+    return names
+
+
 def clean_weights(weights: pd.Series | dict | None, tickers: list[str]) -> pd.Series:
     """Coerce a strategy's output into a float Series over the panel's tickers."""
     if weights is None:

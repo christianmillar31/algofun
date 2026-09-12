@@ -54,7 +54,8 @@ algofun backtest --strategy momentum --params market_filter=None --benchmark "" 
 | --- | --- |
 | `algofun/data` | Universes (S&P 500 list, ETFs), Yahoo + Stooq sources with a fallback chain, incremental parquet cache, aligned OHLCV `Panel`, bulk CSV import |
 | `algofun/backtest` | Event-driven daily engine, `CostModel` presets (`zero`, `retail`, `ibkr`, `pessimistic`), metrics (CAGR, Sharpe, Sortino, max drawdown, Calmar, turnover, win rate, beta/alpha vs benchmark), rebalance schedules, walk-forward optimisation |
-| `algofun/strategies` | `buy_and_hold`, `sma_crossover`, `momentum` (cross-sectional, with market filter), `mean_reversion` (z-score dips in uptrends). Each declares its own `warmup`, `rebalance` and `param_grid` |
+| `algofun/strategies` | `buy_and_hold`, `sma_crossover`, `momentum` (cross-sectional, with market filter), `mean_reversion` (z-score dips in uptrends), `sentiment` (news tone on the Loughran-McDonald lexicon). Each declares its own `warmup`, `rebalance` and `param_grid` |
+| `algofun/text` | Loughran-McDonald finance lexicon (cached download), tokenizer with the negation rule, per-article tone and negativity, and the mapping from article timestamps to the NYSE session at whose close they are first known |
 | `algofun/risk` | Equal-weight, inverse-vol and vol-target sizing; hard `RiskLimits` (per-name cap, gross cap, no shorts by default) applied after every strategy decision |
 | `algofun/broker` | `Broker` interface, in-memory `PaperBroker` (persists to JSON, uses the same `CostModel`), `AlpacaBroker` adapter |
 | `algofun/live` | `plan_rebalance` diffs target weights against broker holdings with the same no-trade band as the backtester; `execute_plan` submits sells then buys and appends to `runs/rebalance_log.jsonl` |
@@ -84,6 +85,49 @@ class Breakout(Strategy):
 Register it in `algofun/strategies/__init__.py` and it works in every command.
 Ask for bounded history (`view.history(field, lookback)`); it is faster and it
 documents what the strategy needs.
+
+## News sentiment (Loughran-McDonald)
+
+If you do not believe in price patterns, this is the other door, and it goes
+through the same honesty checks. Nothing here needs a language model, on
+purpose: a word list published in 2011 cannot know how a 2018 headline turned
+out, whereas any model trained on the internet does, which makes a backtest
+of model-scored history worthless.
+
+- `algofun fetch-news --start 2023-01-01 --max-minutes 120` pulls Alpaca's
+  (Benzinga) news, month by month, into `data/cache/news/`. Free on the basic
+  data plan, history from 2015, 50 articles a page and 200 requests a minute,
+  so the first fetch of a few years takes hours. It stops cleanly at the time
+  budget and the next run resumes; finished months are never re-fetched.
+- Every article is scored with the Loughran-McDonald dictionary (2,355
+  negative and 354 positive finance words, with "not profitable" counted as
+  negative) and assigned to the first NYSE session whose close it precedes: a
+  story at 15:59 New York time on Tuesday belongs to Tuesday, at 16:01 to
+  Wednesday, on Saturday to Monday. The decision at Tuesday's close may only
+  read Tuesday's news, and is filled at Wednesday's open like everything else.
+- `algofun backtest --strategy sentiment --news --pit --start 2023-03-01 --stress`
+  ranks names by article-weighted mean tone over the last `lookback` sessions
+  (or by minus negativity with `score=neg`, the half of the dictionary that
+  Loughran & McDonald found actually predicts anything), requires
+  `min_articles` in the window, and holds the top N with the same sizing,
+  sector cap, vol target and index filter as momentum.
+- `algofun sentiment --top 15` prints today's ranking from the cache;
+  `algofun rebalance ... --strategy sentiment --news` trades it, paper first.
+- The "Research (news sentiment)" workflow does all of the above on a GitHub
+  runner with the paper keys and uploads the reports, momentum on the same
+  window beside it for comparison.
+
+What to expect, honestly: the literature finds negative tone predicts
+short-horizon returns with small magnitude, mostly in small caps, and it
+decays within days. Headline sentiment on large caps is arbitraged in
+seconds by machines that read faster than a daily-bar system. Slower
+information (earnings surprises, transcript tone) has better evidence. So
+the numbers may well say "no edge after costs"; that is a result, not a bug.
+
+The dictionary itself is published by the University of Notre Dame's
+Software Repository for Accounting and Finance and is free for personal and
+academic use (commercial use needs their licence); we read the copy bundled
+in the MIT-licensed `pysentiment2` package.
 
 ## Going live (read this part)
 

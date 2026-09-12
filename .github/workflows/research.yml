@@ -1,0 +1,127 @@
+# Research run: fetch news, score it with the Loughran-McDonald lexicon, and
+# backtest the sentiment strategy next to momentum on the same window with the
+# same costs and point-in-time rules. Manual only. Always paper keys, never
+# trades.
+#
+# The first news fetch of a multi-year window takes hours (50 articles a page,
+# 200 requests a minute). The fetch stops cleanly at `fetch_minutes` and the
+# cache is saved, so re-run the workflow to keep filling it in; the backtest
+# uses whatever months are complete.
+
+name: Research (news sentiment)
+
+on:
+  workflow_dispatch:
+    inputs:
+      news_start:
+        description: "first month of news to fetch (YYYY-MM-DD)"
+        default: "2023-01-01"
+      fetch_minutes:
+        description: "time budget for the news fetch, minutes"
+        default: "150"
+      start:
+        description: "backtest start (YYYY-MM-DD); leave a few months after news_start for the window"
+        default: "2023-03-01"
+      universe:
+        description: "universe spec"
+        default: "sp500+etfs"
+      params:
+        description: "sentiment strategy params (k=v,k=v)"
+        default: "lookback=10,top_n=20,min_articles=3"
+
+concurrency:
+  group: research
+  cancel-in-progress: false
+
+jobs:
+  research:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    env:
+      ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
+      ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
+      ALPACA_PAPER: "true"
+      NEWS_START: ${{ inputs.news_start }}
+      FETCH_MINUTES: ${{ inputs.fetch_minutes }}
+      START: ${{ inputs.start }}
+      UNIVERSE: ${{ inputs.universe }}
+      PARAMS: ${{ inputs.params }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -e ".[alpaca]"
+
+      - name: Restore bar cache
+        uses: actions/cache/restore@v4
+        with:
+          path: data/cache
+          key: bars-${{ github.run_id }}
+          restore-keys: bars-
+
+      - name: Restore news cache
+        uses: actions/cache/restore@v4
+        with:
+          path: data/cache/news
+          key: news-${{ github.run_id }}
+          restore-keys: news-
+
+      - name: Check credentials
+        run: |
+          if [ -z "$ALPACA_API_KEY" ] || [ -z "$ALPACA_SECRET_KEY" ]; then
+            echo "::error::ALPACA_API_KEY / ALPACA_SECRET_KEY are not set"; exit 1
+          fi
+
+      - name: Refresh bars
+        run: algofun fetch --universe "$UNIVERSE" --start 2000-01-01
+
+      - name: Fetch news (resumable)
+        run: algofun fetch-news --start "$NEWS_START" --max-minutes "$FETCH_MINUTES"
+
+      - name: Latest sentiment ranking
+        if: always()
+        run: algofun sentiment --universe "$UNIVERSE" --params "$PARAMS" --min-bars 300 --top 15 || true
+
+      - name: Backtest sentiment (point-in-time, cost stress)
+        if: always()
+        run: |
+          mkdir -p runs/research
+          algofun backtest --strategy sentiment --news --pit --universe "$UNIVERSE" --params "$PARAMS" \
+            --start "$START" --min-bars 300 --stress --out runs/research/sentiment | tee runs/research/sentiment.txt
+
+      - name: Backtest momentum on the same window
+        if: always()
+        run: |
+          algofun backtest --strategy momentum --pit --universe "$UNIVERSE" \
+            --start "$START" --min-bars 300 --stress --out runs/research/momentum | tee runs/research/momentum.txt
+
+      - name: Walk-forward sentiment (trial-counted)
+        if: always()
+        run: |
+          algofun walkforward --strategy sentiment --news --pit --universe "$UNIVERSE" \
+            --start "$START" --min-bars 300 --train-bars 252 --test-bars 63 \
+            --out runs/research/sentiment_wf | tee runs/research/sentiment_wf.txt || true
+
+      - name: Save news cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: data/cache/news
+          key: news-${{ github.run_id }}
+
+      - name: Save bar cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: data/cache
+          key: bars-${{ github.run_id }}
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: research-${{ github.run_id }}
+          path: runs/research/
+          if-no-files-found: ignore

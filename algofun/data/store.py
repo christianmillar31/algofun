@@ -1,0 +1,282 @@
+"""Local parquet cache of daily bars, one file per ticker, plus the Panel
+structure the backtester consumes.
+
+    store = BarStore("data/cache")
+    store.update(["SPY", "AAPL"], start="2000-01-01")   # fetch/incremental
+    panel = store.load_panel(["SPY", "AAPL"])            # aligned wide frames
+"""
+from __future__ import annotations
+
+import logging
+import os
+from collections.abc import Iterable, Sequence
+from dataclasses import dataclass, field
+from pathlib import Path
+
+import pandas as pd
+
+from .sources import BAR_COLUMNS, BarSource, empty_bars, get_source, normalize_bars  # noqa: F401
+
+log = logging.getLogger(__name__)
+
+
+@dataclass
+class Panel:
+    """Wide, date-aligned OHLCV frames. Rows are dates, columns are tickers.
+
+    A ticker that did not trade on a date holds NaN in every field. The
+    engine treats NaN close as "not tradable today".
+    """
+
+    open: pd.DataFrame
+    high: pd.DataFrame
+    low: pd.DataFrame
+    close: pd.DataFrame
+    volume: pd.DataFrame
+    sectors: dict[str, str] = field(default_factory=dict)   # ticker -> sector, may be empty
+    membership: pd.DataFrame | None = None                   # date x ticker bool; None = everything eligible
+    features: dict[str, pd.DataFrame] = field(default_factory=dict)  # name -> date x ticker frame, aligned
+
+    @property
+    def tickers(self) -> list[str]:
+        return list(self.close.columns)
+
+    @property
+    def dates(self) -> pd.DatetimeIndex:
+        return self.close.index
+
+    def __len__(self) -> int:
+        return len(self.close)
+
+    def field(self, name: str) -> pd.DataFrame:
+        return getattr(self, name)
+
+    def slice(self, start=None, end=None) -> Panel:
+        m = self.membership.loc[start:end] if self.membership is not None else None
+        feats = {k: v.loc[start:end] for k, v in self.features.items()}
+        return Panel(**{f: getattr(self, f).loc[start:end] for f in BAR_COLUMNS}, sectors=self.sectors,
+                     membership=m, features=feats)
+
+    def select(self, tickers: Sequence[str]) -> Panel:
+        cols = [t for t in tickers if t in self.close.columns]
+        m = self.membership[cols] if self.membership is not None else None
+        feats = {k: v.reindex(columns=cols) for k, v in self.features.items()}
+        return Panel(**{f: getattr(self, f)[cols] for f in BAR_COLUMNS}, sectors=self.sectors,
+                     membership=m, features=feats)
+
+    def eligible(self, i: int) -> pd.Series:
+        """Names eligible to be held at bar i: has a close, and (if known) was an index member."""
+        ok = self.close.iloc[i].notna()
+        if self.membership is not None:
+            ok = ok & self.membership.iloc[i].astype(bool)
+        return ok
+
+    def with_membership(self, membership: pd.DataFrame) -> Panel:
+        """Attach a point-in-time membership history (snapshot date -> ticker list)."""
+        from .membership import membership_mask
+        mask = membership_mask(membership, self.dates, self.tickers)
+        return Panel(**{f: getattr(self, f) for f in BAR_COLUMNS}, sectors=self.sectors, membership=mask,
+                     features=self.features)
+
+    def with_features(self, features: dict[str, pd.DataFrame], fill_value: float = 0.0) -> Panel:
+        """Attach named date x ticker frames (news sentiment, anything external),
+        re-aligned to this panel's dates and tickers. Missing cells take `fill_value`."""
+        aligned = {}
+        for name, df in features.items():
+            f = df.reindex(index=self.dates, columns=self.tickers)
+            aligned[name] = f.fillna(fill_value) if fill_value is not None else f
+        return Panel(**{f: getattr(self, f) for f in BAR_COLUMNS}, sectors=self.sectors,
+                     membership=self.membership, features={**self.features, **aligned})
+
+    def feature(self, name: str) -> pd.DataFrame:
+        try:
+            return self.features[name]
+        except KeyError:
+            raise KeyError(f"panel has no feature {name!r}; available: {sorted(self.features)}") from None
+
+    def sector_of(self, ticker: str) -> str:
+        return self.sectors.get(ticker, "Unknown")
+
+    def with_min_history(self, min_bars: int) -> Panel:
+        """Drop tickers with fewer than min_bars non-NaN closes."""
+        keep = self.close.notna().sum() >= min_bars
+        return self.select(list(self.close.columns[keep]))
+
+    def returns(self) -> pd.DataFrame:
+        return self.close.pct_change(fill_method=None)
+
+    @classmethod
+    def from_bars(cls, bars: dict[str, pd.DataFrame], start=None, end=None,
+                  sectors: dict[str, str] | None = None) -> Panel:
+        if not bars:
+            raise ValueError("no bars supplied")
+        frames = {f: {} for f in BAR_COLUMNS}
+        for ticker, df in bars.items():
+            df = normalize_bars(df).loc[start:end]
+            for f in BAR_COLUMNS:
+                frames[f][ticker] = df[f]
+        wide = {f: pd.DataFrame(frames[f]).sort_index() for f in BAR_COLUMNS}
+        idx = wide["close"].index
+        idx.name = "date"
+        wide = {f: d.reindex(idx) for f, d in wide.items()}
+        return cls(**wide, sectors=dict(sectors or {}))
+
+
+class BarStore:
+    """Parquet cache: <root>/bars/<TICKER>.parquet."""
+
+    def __init__(self, root: str | os.PathLike = "data/cache"):
+        self.root = Path(root)
+        self.bars_dir = self.root / "bars"
+        self.bars_dir.mkdir(parents=True, exist_ok=True)
+
+    # -- basic file ops ----------------------------------------------------
+    def path(self, ticker: str) -> Path:
+        return self.bars_dir / f"{ticker.upper()}.parquet"
+
+    def has(self, ticker: str) -> bool:
+        return self.path(ticker).exists()
+
+    def tickers(self) -> list[str]:
+        return sorted(p.stem for p in self.bars_dir.glob("*.parquet"))
+
+    def load(self, ticker: str) -> pd.DataFrame:
+        p = self.path(ticker)
+        if not p.exists():
+            return empty_bars()
+        return normalize_bars(pd.read_parquet(p))
+
+    def save(self, ticker: str, df: pd.DataFrame, merge: bool = True) -> pd.DataFrame:
+        df = normalize_bars(df)
+        if merge and self.has(ticker):
+            old = self.load(ticker)
+            df = pd.concat([old, df])
+            df = df[~df.index.duplicated(keep="last")].sort_index()
+        df.to_parquet(self.path(ticker))
+        return df
+
+    def last_date(self, ticker: str) -> pd.Timestamp | None:
+        df = self.load(ticker)
+        return None if df.empty else df.index[-1]
+
+    # -- fetching ----------------------------------------------------------
+    def update(self, tickers: Iterable[str], start: str | None = "1990-01-01",
+               end: str | None = None, source: BarSource | str = "auto",
+               force: bool = False, overlap_days: int = 7) -> dict[str, int]:
+        """Fetch new bars for each ticker and merge into the cache.
+
+        Incremental: a cached ticker is re-fetched from (last_date - overlap_days)
+        so late adjustments to the last few bars are picked up. Returns a map
+        ticker -> number of rows now cached (0 means nothing could be fetched).
+        """
+        src = get_source(source) if isinstance(source, str) else source
+        inc_src = get_source("auto-incremental") if source == "auto" else src
+        tickers = list(dict.fromkeys(t.upper() for t in tickers))
+        full, incremental = [], {}
+        for t in tickers:
+            last = None if force else self.last_date(t)
+            if last is None:
+                full.append(t)
+            else:
+                incremental[t] = (last - pd.Timedelta(days=overlap_days)).strftime("%Y-%m-%d")
+
+        counts: dict[str, int] = {}
+        if full:
+            log.info("full fetch of %d tickers from %s via %s", len(full), start, src.name)
+            got = src.fetch_many(full, start, end)
+            for t in full:
+                df = got.get(t)
+                if df is None or df.empty:
+                    log.warning("no data for %s", t)
+                    counts[t] = len(self.load(t))
+                    continue
+                counts[t] = len(self.save(t, df, merge=not force))
+
+        # group incremental fetches by their start date to keep batch calls small
+        by_start: dict[str, list[str]] = {}
+        for t, s in incremental.items():
+            by_start.setdefault(s, []).append(t)
+        realign: list[str] = []
+        for s, ts in by_start.items():
+            got = inc_src.fetch_many(ts, s, end)
+            for t in ts:
+                df = got.get(t)
+                if df is not None and not df.empty:
+                    if self._history_disagrees(t, df):
+                        realign.append(t)
+                        continue
+                    self.save(t, df, merge=True)
+                counts[t] = len(self.load(t))
+        if realign:
+            # an adjustment (split, dividend) or a vendor mismatch changed history: one consistent
+            # series from the base source beats a stitched one, so refetch the whole thing
+            log.warning("re-downloading full history for %d tickers whose older bars no longer match: %s",
+                        len(realign), ", ".join(realign[:10]))
+            got = src.fetch_many(realign, start, end)
+            for t in realign:
+                df = got.get(t)
+                if df is not None and not df.empty:
+                    self.save(t, df, merge=False)
+                counts[t] = len(self.load(t))
+        return counts
+
+    def _history_disagrees(self, ticker: str, fresh: pd.DataFrame, tolerance: float = 0.02,
+                           ignore_newest: int = 2) -> bool:
+        """True when a fresh fetch disagrees with cached closes on overlapping days
+        OTHER than the newest few (which legitimately change when a partial
+        intraday bar is replaced by the completed one)."""
+        old = self.load(ticker)
+        fresh = normalize_bars(fresh)
+        common = old.index.intersection(fresh.index).sort_values()
+        if len(common) <= ignore_newest:
+            return False
+        settled = common[:-ignore_newest]
+        gap = ((fresh.loc[settled, "close"] / old.loc[settled, "close"]) - 1.0).abs()
+        worst = float(gap.max())
+        if worst > tolerance:
+            log.warning("%s: settled closes differ from cache by up to %.1f%% on %d overlapping days",
+                        ticker, worst * 100, len(settled))
+            return True
+        return False
+
+    # -- panel -------------------------------------------------------------
+    def load_panel(self, tickers: Sequence[str] | None = None, start=None, end=None,
+                   min_bars: int = 0, sectors: dict[str, str] | None = None) -> Panel:
+        tickers = list(tickers) if tickers else self.tickers()
+        bars = {}
+        for t in tickers:
+            df = self.load(t)
+            if not df.empty:
+                bars[t.upper()] = df
+        missing = sorted(set(t.upper() for t in tickers) - set(bars))
+        if missing:
+            log.warning("%d tickers not in cache (run `algofun fetch`): %s%s",
+                        len(missing), ", ".join(missing[:10]), "..." if len(missing) > 10 else "")
+        panel = Panel.from_bars(bars, start, end, sectors=sectors)
+        if min_bars:
+            panel = panel.with_min_history(min_bars)
+        return panel
+
+
+def import_long_csv(path: str | os.PathLike, store: BarStore, ticker_col: str = "Name",
+                    date_col: str = "date", column_map: dict[str, str] | None = None,
+                    merge: bool = True) -> dict[str, int]:
+    """Bulk-import a long-format CSV (one row per ticker-day) into the store.
+
+    Works out of the box with the plotly `all_stocks_5yr.csv` layout:
+        date,open,high,low,close,volume,Name
+    """
+    df = pd.read_csv(path)
+    if column_map:
+        df = df.rename(columns=column_map)
+    counts = {}
+    for ticker, g in df.groupby(ticker_col):
+        g = g.drop(columns=[ticker_col]).rename(columns={date_col: "date"})
+        try:
+            bars = normalize_bars(g)
+        except ValueError as e:
+            log.warning("skipping %s: %s", ticker, e)
+            continue
+        t = str(ticker).upper().replace(".", "-")
+        counts[t] = len(store.save(t, bars, merge=merge))
+    return counts

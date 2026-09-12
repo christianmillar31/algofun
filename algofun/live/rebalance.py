@@ -1,0 +1,226 @@
+"""Turn a strategy's target weights into broker orders.
+
+Run this once per day after the close. Market DAY orders submitted after
+hours queue for the next open, which is exactly the "decide at close, fill
+at next open" assumption the backtester makes.
+"""
+from __future__ import annotations
+
+import json
+import logging
+import time
+import uuid
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+
+import pandas as pd
+
+from ..backtest.view import MarketView
+from ..broker.base import Broker, Order, OrderResult
+from ..data.store import BarStore, Panel
+from ..risk.limits import RiskLimits
+from ..strategies.base import Strategy, clean_weights
+from .calendar import is_rebalance_day, next_trading_day
+
+log = logging.getLogger(__name__)
+
+
+@dataclass
+class RebalancePlan:
+    as_of: pd.Timestamp
+    equity: float
+    cash: float
+    target_weights: pd.Series
+    current_weights: pd.Series
+    orders: list[Order]
+    prices: pd.Series
+    results: list[OrderResult] = field(default_factory=list)
+    skipped: str | None = None   # set when the schedule says "not today"
+    exposure_scale: float = 1.0  # < 1 when the drawdown budget is de-risking
+    drawdown: float = 0.0
+
+    def to_frame(self) -> pd.DataFrame:
+        rows = []
+        for o in self.orders:
+            px = float(self.prices.get(o.ticker, float("nan")))
+            rows.append({"ticker": o.ticker, "side": o.side, "quantity": round(o.quantity, 4),
+                         "est_price": px, "est_notional": round(o.quantity * px, 2),
+                         "current_w": round(float(self.current_weights.get(o.ticker, 0.0)), 4),
+                         "target_w": round(float(self.target_weights.get(o.ticker, 0.0)), 4)})
+        return pd.DataFrame(rows, columns=["ticker", "side", "quantity", "est_price", "est_notional",
+                                           "current_w", "target_w"])
+
+    def describe(self) -> str:
+        head = (f"as of {self.as_of.date()}  equity={self.equity:,.2f}  cash={self.cash:,.2f}  "
+                f"targets={int((self.target_weights != 0).sum())} names  orders={len(self.orders)}")
+        if self.exposure_scale < 1.0:
+            head += f"\n  drawdown budget: {self.drawdown:.1%} from peak -> exposure x{self.exposure_scale:.2f}"
+        if self.skipped:
+            return head + f"\n  skipped: {self.skipped}"
+        if not self.orders:
+            return head + "\n  (no trades needed)"
+        return head + "\n" + self.to_frame().to_string(index=False)
+
+
+def _safe_latest_prices(broker: Broker, tickers: Sequence[str]) -> pd.Series:
+    """Ask the broker for quotes; a failure is logged, not fatal."""
+    if not tickers:
+        return pd.Series(dtype="float64")
+    try:
+        px = broker.latest_prices(list(tickers))
+    except Exception as e:  # noqa: BLE001 - any broker/network error
+        log.warning("broker quotes failed (%s); falling back to last close", e)
+        return pd.Series(dtype="float64")
+    return pd.Series(px, dtype="float64")
+
+
+def compute_orders(target_weights: pd.Series, current_qty: pd.Series, prices: pd.Series, equity: float,
+                   min_trade_notional: float = 1.0, min_trade_weight: float = 0.002,
+                   allow_fractional: bool = True) -> list[Order]:
+    """Diff target weights against current holdings and emit market orders.
+
+    Same no-trade band as the backtester: skip trades smaller than
+    min_trade_weight of equity unless they close a position.
+    """
+    tickers = sorted(set(target_weights.index) | set(current_qty.index))
+    tw = target_weights.reindex(tickers).fillna(0.0)
+    cq = current_qty.reindex(tickers).fillna(0.0)
+    px = prices.reindex(tickers)
+    orders: list[Order] = []
+    for t in tickers:
+        p = px[t]
+        if pd.isna(p) or p <= 0:
+            if tw[t] != 0 or cq[t] != 0:
+                log.warning("no price for %s; skipping", t)
+            continue
+        target_qty = tw[t] * equity / p
+        if not allow_fractional:
+            target_qty = float(int(target_qty))
+        delta = target_qty - cq[t]
+        notional = abs(delta) * p
+        closing = tw[t] == 0 and cq[t] != 0
+        if notional < min_trade_notional:
+            continue
+        if not closing and notional < min_trade_weight * equity:
+            continue
+        qty = abs(delta) if allow_fractional else float(int(abs(delta)))
+        if qty <= 0:
+            continue
+        orders.append(Order(t, "buy" if delta > 0 else "sell", qty))
+    return orders
+
+
+def cap_buys_to_cash(orders: list[Order], prices: pd.Series, cash: float, equity: float,
+                     cash_buffer: float = 0.005) -> list[Order]:
+    """Scale buy quantities so total buy notional never exceeds
+    cash + expected sell proceeds - cash_buffer * equity.
+
+    Market fills land a little above the reference price; without a buffer a
+    fully-invested target overspends by the slippage and a cash account
+    rejects the last order. Sells are never scaled.
+    """
+    buys = [o for o in orders if o.side == "buy"]
+    if not buys:
+        return orders
+    sell_notional = sum(o.quantity * float(prices.get(o.ticker, 0.0)) for o in orders if o.side == "sell")
+    buy_notional = sum(o.quantity * float(prices.get(o.ticker, 0.0)) for o in buys)
+    available = cash + sell_notional - cash_buffer * equity
+    if buy_notional <= available or buy_notional <= 0:
+        return orders
+    scale = max(available, 0.0) / buy_notional
+    log.warning("buys (%.2f) exceed available cash (%.2f); scaling buys by %.4f", buy_notional, available, scale)
+    for o in buys:
+        o.quantity = o.quantity * scale
+    return [o for o in orders if o.side == "sell" or o.quantity > 0]
+
+
+def plan_rebalance(strategy: Strategy, store: BarStore, broker: Broker, universe: Sequence[str],
+                   limits: RiskLimits | None = None, min_trade_notional: float = 1.0,
+                   min_trade_weight: float = 0.002, min_bars: int | None = None,
+                   force: bool = False, cash_buffer: float = 0.005,
+                   sectors: dict[str, str] | None = None, exposure_scale: float = 1.0,
+                   drawdown: float = 0.0, attach: Callable[[Panel], Panel] | None = None) -> RebalancePlan:
+    """Build today's order list.
+
+    Respects the strategy's rebalance schedule the same way the backtester
+    does: on a non-rebalance day the plan is empty and `plan.skipped` says
+    why. `force=True` overrides that (first deployment, manual runs).
+    `attach` decorates the loaded panel (news features, ...) before the
+    strategy sees it, so live and backtest read the same inputs.
+    """
+    limits = limits or RiskLimits()
+    panel = store.load_panel(list(universe), min_bars=min_bars or 0, sectors=sectors)
+    if attach is not None:
+        panel = attach(panel)
+    if len(panel) <= strategy.warmup:
+        raise ValueError(f"need > {strategy.warmup} bars of history, have {len(panel)}; run `algofun fetch`")
+    view = MarketView(panel, len(panel) - 1)
+
+    acct = broker.account()
+    positions = broker.positions()
+    current_qty = pd.Series({t: p.quantity for t, p in positions.items()}, dtype="float64")
+
+    if not force and not is_rebalance_day(view.date, strategy.rebalance, panel.dates):
+        prices = _safe_latest_prices(broker, list(current_qty.index))
+        current_w = (current_qty * prices.reindex(current_qty.index)) / acct.equity if acct.equity else current_qty * 0
+        return RebalancePlan(as_of=view.date, equity=acct.equity, cash=acct.cash,
+                             target_weights=pd.Series(dtype="float64"), current_weights=current_w.fillna(0.0),
+                             orders=[], prices=prices,
+                             skipped=f"{view.date.date()} is not a rebalance day for schedule={strategy.rebalance!r} "
+                                     f"(next trading day {next_trading_day(view.date).date()}); use force to override")
+
+    weights = limits.apply(clean_weights(strategy.target_weights(view), panel.tickers), sectors=panel.sectors)
+    weights = weights * float(exposure_scale)
+    weights = weights[weights != 0]
+    need_px = sorted(set(weights.index) | set(current_qty.index))
+    prices = _safe_latest_prices(broker, need_px)
+    # fall back to last close from our own data when the broker has no quote
+    last_close = panel.close.iloc[-1]
+    missing = [t for t in need_px if t not in prices.index or pd.isna(prices.get(t))]
+    if missing:
+        log.warning("no broker quote for %d symbols, using last close: %s", len(missing), ", ".join(missing[:10]))
+    prices = prices.combine_first(last_close.reindex(need_px))
+    current_w = (current_qty * prices.reindex(current_qty.index)) / acct.equity if acct.equity else current_qty * 0
+    orders = compute_orders(weights, current_qty, prices, acct.equity, min_trade_notional,
+                            min_trade_weight, broker.supports_fractional)
+    orders = cap_buys_to_cash(orders, prices, acct.cash, acct.equity, cash_buffer)
+    if not broker.supports_fractional:
+        for o in orders:
+            o.quantity = float(int(o.quantity))
+        orders = [o for o in orders if o.quantity > 0]
+    run_id = uuid.uuid4().hex[:8]   # unique per plan so retries within a run are idempotent
+    for o in orders:
+        o.client_order_id = f"algofun-{view.date:%Y%m%d}-{run_id}-{o.ticker}-{o.side}"
+    return RebalancePlan(as_of=view.date, equity=acct.equity, cash=acct.cash, target_weights=weights,
+                         current_weights=current_w.fillna(0.0), orders=orders, prices=prices,
+                         exposure_scale=float(exposure_scale), drawdown=float(drawdown))
+
+
+def execute_plan(plan: RebalancePlan, broker: Broker, log_path: str | Path | None = "runs/rebalance_log.jsonl",
+                 settle_seconds: float = 0.0) -> list[OrderResult]:
+    """Submit, optionally wait for asynchronous fills, refresh statuses, log.
+
+    Each log row carries the price the plan was sized at (`modelled_price`)
+    beside the realised fill, which is what the shortfall report compares.
+    """
+    results = broker.submit_all(plan.orders)
+    if settle_seconds > 0 and any(r.status not in ("filled", "rejected") for r in results):
+        time.sleep(settle_seconds)
+        results = broker.refresh(results)
+    plan.results = results
+    if log_path:
+        p = Path(log_path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with p.open("a") as f:
+            for r in results:
+                f.write(json.dumps({
+                    "ts": datetime.now(timezone.utc).isoformat(), "broker": broker.name,
+                    "as_of": str(plan.as_of.date()), "ticker": r.order.ticker, "side": r.order.side,
+                    "quantity": r.order.quantity, "status": r.status, "filled_quantity": r.filled_quantity,
+                    "filled_price": r.filled_price, "order_id": r.order_id, "message": r.message,
+                    "modelled_price": float(plan.prices.get(r.order.ticker, float("nan"))),
+                    "exposure_scale": plan.exposure_scale,
+                }) + "\n")
+    return results

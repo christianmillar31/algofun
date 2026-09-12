@@ -124,6 +124,28 @@ seconds by machines that read faster than a daily-bar system. Slower
 information (earnings surprises, transcript tone) has better evidence. So
 the numbers may well say "no edge after costs"; that is a result, not a bug.
 
+### First real-news result (2026-09-12)
+
+945,915 Benzinga articles, January 2023 to September 2026, scored once and
+cached. Both strategies on the same window (March 2023 to September 2026),
+point-in-time S&P 500 membership, retail costs:
+
+| Strategy | CAGR | Sharpe | Max DD | Turnover | 2x costs | 3x costs |
+| --- | --- | --- | --- | --- | --- | --- |
+| Sentiment (tone, 10 sessions, top 20, weekly) | -1.6% | -0.09 | -15.0% | 64x | -4.5% | -6.3% |
+| Momentum (12-1, top 10, monthly) | 10.3% | 0.71 | -11.6% | 5.6x | 9.9% | 9.6% |
+| SPY buy and hold | 22.2% | 1.42 | -18.8% | | | |
+
+Walk-forward on sentiment (six configurations per fold, seven folds, 42
+trials counted): out-of-sample Sharpe -0.17 +/- 0.76, walk-forward
+efficiency -0.22, in-sample deflated Sharpe 0.63. Headline tone on large
+caps, held for a week, has no edge here, and it turns over the book 64
+times a year paying for the privilege. That is the literature's expectation
+and the pipeline reported it without flinching. Note also that both
+strategies trailed a raw S&P 500 that compounded at 22% a year over this
+window: the vol target and drawdown budget cap exposure at the cost of
+upside in a straight-up market, which is the trade they are meant to make.
+
 The dictionary itself is published by the University of Notre Dame's
 Software Repository for Accounting and Finance and is free for personal and
 academic use (commercial use needs their licence); we read the copy bundled

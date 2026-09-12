@@ -133,14 +133,19 @@ point-in-time S&P 500 membership, retail costs:
 | Strategy | CAGR | Sharpe | Max DD | Turnover | 2x costs | 3x costs |
 | --- | --- | --- | --- | --- | --- | --- |
 | Sentiment (tone, 10 sessions, top 20, weekly) | -1.6% | -0.09 | -15.0% | 64x | -4.5% | -6.3% |
+| Sentiment (negativity only, same settings) | 1.6% | 0.20 | -12.5% | 70x | -3.0% | -5.8% |
 | Momentum (12-1, top 10, monthly) | 10.3% | 0.71 | -11.6% | 5.6x | 9.9% | 9.6% |
 | SPY buy and hold | 22.2% | 1.42 | -18.8% | | | |
 
-Walk-forward on sentiment (six configurations per fold, seven folds, 42
-trials counted): out-of-sample Sharpe -0.17 +/- 0.76, walk-forward
-efficiency -0.22, in-sample deflated Sharpe 0.63. Headline tone on large
-caps, held for a week, has no edge here, and it turns over the book 64
-times a year paying for the privilege. That is the literature's expectation
+Walk-forward on the tone variant (six configurations per fold, seven
+folds, 42 trials counted): out-of-sample Sharpe -0.17 +/- 0.76,
+walk-forward efficiency -0.22, in-sample deflated Sharpe 0.63. Negativity
+alone, the half of the dictionary Loughran & McDonald found informative,
+is marginally positive at one times costs and zero within its standard
+error of 0.53; the cost table says each 1x of costs is worth about 4.6% a
+year at this turnover, so whatever gross signal exists is spent on
+trading. Headline tone on large caps, held for a week, has no edge here,
+and it turns over the book 64 to 70 times a year paying for the privilege. That is the literature's expectation
 and the pipeline reported it without flinching. Note also that both
 strategies trailed a raw S&P 500 that compounded at 22% a year over this
 window: the vol target and drawdown budget cap exposure at the cost of

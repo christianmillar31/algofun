@@ -100,7 +100,7 @@ jobs:
       - name: Walk-forward sentiment (trial-counted)
         if: always()
         run: |
-          algofun walkforward --strategy sentiment --news --pit --universe "$UNIVERSE" \
+          algofun walkforward --strategy sentiment --news --pit --universe "$UNIVERSE" --params "$PARAMS" \
             --start "$START" --min-bars 300 --train-bars 252 --test-bars 63 \
             --out runs/research/sentiment_wf | tee runs/research/sentiment_wf.txt || true
 

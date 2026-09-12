@@ -98,3 +98,12 @@ def test_source_requires_keys(monkeypatch):
     monkeypatch.delenv("ALPACA_SECRET_KEY", raising=False)
     with pytest.raises(RuntimeError):
         AlpacaNewsSource().client  # noqa: B018 - property access is the test
+
+
+def test_save_month_drops_articles_created_outside_the_month(tmp_path):
+    store = NewsStore(tmp_path)
+    rows = [art(1, "2024-03-05T10:00:00Z", ["A"]),
+            art(2, "2011-11-17T10:00:00Z", ["A"], updated="2024-03-06T10:00:00Z"),   # re-edited old story
+            art(3, "2024-04-01T00:00:00Z", ["A"])]
+    kept = store.save_month(pd.Timestamp("2024-03-01", tz="UTC"), pd.DataFrame(rows), merge=False)
+    assert kept["id"].tolist() == [1]

@@ -156,7 +156,12 @@ class NewsStore:
         return normalize_news(pd.read_parquet(p)) if p.exists() else empty_news()
 
     def save_month(self, month: pd.Timestamp, df: pd.DataFrame, merge: bool = True) -> pd.DataFrame:
+        """Store articles created in `month`. Rows created outside it are dropped:
+        Alpaca's window filter occasionally returns an old article that was merely
+        re-edited in the month, and a 2011 story is not 2023 information."""
         df = normalize_news(df)
+        m_end = (month + pd.offsets.MonthBegin(1)).normalize()
+        df = df[(df["created_at"] >= month) & (df["created_at"] < m_end)]
         if merge:
             df = normalize_news(pd.concat([self.load_month(month), df]))
         df.to_parquet(self.path(month))
